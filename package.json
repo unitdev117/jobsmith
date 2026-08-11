@@ -1,0 +1,44 @@
+{
+  "name": "jobsmith",
+  "version": "0.2.0",
+  "description": "Shared terminal-native work coordinator backed by PostgreSQL and Valkey",
+  "type": "module",
+  "bin": {
+    "jobsmith": "src/index.ts"
+  },
+  "engines": {
+    "bun": "1.3.12"
+  },
+  "packageManager": "bun@1.3.12",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "manager": "bun run src/index.ts manager",
+    "worker": "bun run src/index.ts worker",
+    "pending": "bun run src/index.ts pending",
+    "init": "bun run src/index.ts init",
+    "connect": "bun run src/index.ts connect",
+    "dev": "bun --watch run src/index.ts",
+    "migrate": "bun run src/db/migrate.ts",
+    "test": "bun test",
+    "typecheck": "bun ./node_modules/typescript/bin/tsc --noEmit",
+    "lint": "bun ./node_modules/eslint/bin/eslint.js .",
+    "format": "bun ./node_modules/prettier/bin/prettier.cjs --write .",
+    "format:check": "bun ./node_modules/prettier/bin/prettier.cjs --check .",
+    "build": "bun build src/index.ts --target=bun --outdir=dist"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "ioredis": "^6.0.0",
+    "pino": "^9.9.0",
+    "postgres": "^3.4.7",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.34.0",
+    "@types/bun": "^1.2.21",
+    "eslint": "^9.34.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.40.0"
+  }
+}

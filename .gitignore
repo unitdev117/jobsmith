@@ -1,0 +1,10 @@
+*.log
+.env
+.jobsmith/
+dump.rdb
+*.txt
+node_modules/
+dist/
+coverage/
+implementation.md
+docs/

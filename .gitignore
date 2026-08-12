@@ -8,3 +8,4 @@ dist/
 coverage/
 implementation.md
 docs/
+jobsmith_test/

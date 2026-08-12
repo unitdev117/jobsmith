@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { runManager, runPending, runWorker } from "./cli/manualApp.ts";
-import { runConnect, runInit } from "./cli/projectApp.ts";
+import { runConnect, runInit, runRemove } from "./cli/projectApp.ts";
 import { loadDatabaseConfig } from "./config/index.ts";
 import { ProjectNotifier } from "./coordination/valkey.ts";
 import { checkDatabase, closeDatabase, createDatabase } from "./db/pool.ts";
@@ -13,6 +13,7 @@ const help = `jobsmith — shared terminal work coordination
 Usage:
   jobsmith init      Initialize this folder or join an existing project
   jobsmith connect   Generate a one-use connection string (host only)
+  jobsmith remove    Remove Jobsmith initialization from this folder
   jobsmith manager   Enlist a new job through an interactive wizard
   jobsmith worker    Select, claim, update, and finish a job
   jobsmith pending   Show all unfinished jobs and their states
@@ -25,7 +26,11 @@ async function main(): Promise<void> {
     process.stdout.write(help);
     return;
   }
-  if (!["init", "connect", "manager", "worker", "pending"].includes(command)) {
+  if (
+    !["init", "connect", "remove", "manager", "worker", "pending"].includes(
+      command,
+    )
+  ) {
     process.stderr.write(`Unknown command: ${command}\n\n${help}`);
     process.exitCode = 1;
     return;
@@ -37,7 +42,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { config: project } = await findLocalProject();
+  const { root, config: project } = await findLocalProject();
+  if (command === "remove") {
+    await runRemove(root, project, log);
+    return;
+  }
   if (command === "connect") {
     await runConnect(project, log);
     return;
@@ -81,8 +90,13 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error: unknown) => {
-  process.stderr.write(
-    `Jobsmith failed: ${error instanceof Error ? error.message : "unknown error"}\n`,
-  );
+  let message = error instanceof Error ? error.message : String(error);
+  if (!message && error instanceof AggregateError) {
+    const cause = error.errors.find(
+      (candidate): candidate is Error => candidate instanceof Error,
+    );
+    message = cause?.message ?? error.name;
+  }
+  process.stderr.write(`Jobsmith failed: ${message || "unknown error"}\n`);
   process.exitCode = 1;
 });

@@ -1,84 +1,86 @@
 # Jobsmith
 
-Jobsmith is a terminal-native human job queue. Managers create work through a guided wizard; workers choose jobs with the arrow keys and update them inside a resumable terminal session. PostgreSQL stores jobs, ownership, progress, and audit history.
+Jobsmith is a CLI-only work coordinator for people and AI agents. A manager enlists work, a worker claims and updates it, and every member sees the same project state from any machine. PostgreSQL is the source of truth; Valkey publishes lightweight project-change notifications.
 
-There is no web server, HTTP API, dashboard, Valkey service, or automated handler runtime.
+There is no webpage, HTTP API, dashboard, or automatic job executor.
 
-## Setup
+## Install
 
 ```bash
-cp .env.example .env
-chmod 600 .env
 bun install --frozen-lockfile
-bun run migrate
 bun link
 ```
 
-The only required setting is a PostgreSQL connection string:
+The machine that initializes a project needs a `.env` file:
 
 ```dotenv
 DATABASE_URL=postgresql://user:password@host/database?sslmode=require
 DATABASE_MIGRATION_URL=
+VALKEY_URL=redis://127.0.0.1:6379
+INVITE_TTL_MINUTES=5
 LOG_LEVEL=warn
 ```
 
-`DATABASE_MIGRATION_URL` is optional. When blank, migrations use `DATABASE_URL`.
+When using the globally linked development command, Jobsmith also checks the installation repository's `.env`. If either required connection is still missing, `jobsmith init` asks for it; PostgreSQL input is hidden in an interactive terminal.
 
-## Commands
+`DATABASE_MIGRATION_URL` is optional. For collaboration across machines, both `DATABASE_URL` and `VALKEY_URL` must be reachable from every machine; `127.0.0.1` only works when all clients run on the same machine.
 
-### Manager
+## Initialize or join
+
+From the project folder, run:
+
+```bash
+jobsmith init
+```
+
+Choose with the arrow keys:
+
+- **Initialize** creates the shared project and makes you its host. It applies migrations and immediately prints the first connection string.
+- **Join** asks for a host-generated connection string, your name, and whether you are a person or AI agent.
+
+Initialization writes `.jobsmith/config.json` with mode `0600`. It contains the project identity and service connections, is ignored by Git, and is discovered from nested folders.
+
+A host can generate another connection string with:
+
+```bash
+jobsmith connect
+```
+
+Each connection string is accepted by Jobsmith once and expires after `INVITE_TTL_MINUTES` (default: five minutes). It is a bearer secret containing the shared service connections, so send it only through a secure channel. Expiry prevents Jobsmith redemption; it cannot revoke a database password that someone copied from the string. Rotate shared service credentials if a connection string is exposed.
+
+To remove Jobsmith from only the current folder:
+
+```bash
+jobsmith remove
+```
+
+Removal requires typing the full word `yes`. It deletes only the local `.jobsmith` configuration, not shared project data or other members. The same folder can run `jobsmith init` again afterward.
+
+## Work commands
 
 ```bash
 jobsmith manager
 ```
 
-The wizard asks for the job name, description, priority, optional due date, optional tags, and final confirmation. Name, description, and priority are required.
-
-### Worker
+Prompts for the required name, description, and priority, then optional due date and tags.
 
 ```bash
 jobsmith worker
 ```
 
-Enter your name, select an available job with ↑/↓ and Enter, then choose an action:
-
-- add a progress note;
-- update completion percentage;
-- mark the job completed;
-- mark the job failed with a reason;
-- release it for another worker;
-- save and exit, leaving it assigned for later resumption.
-
-PostgreSQL conditional updates ensure only one worker can claim a pending job. A worker can resume their own in-progress jobs by running the command again with the same name.
-
-### Pending jobs
+Shows available work and work already assigned to the current local member. Use ↑/↓ and Enter to select a job, then add notes, set progress, pause, block, complete, fail, release, or save the session.
 
 ```bash
 jobsmith pending
 ```
 
-This prints a compact table with job ID, name, priority, due date, and description.
-
-If `jobsmith` is not linked globally, use:
-
-```bash
-bun run manager
-bun run worker
-bun run pending
-```
+Prints all unfinished project work with its priority, current state, due date, and description.
 
 ## States
 
-```text
-PENDING → IN_PROGRESS → COMPLETED
-                      → FAILED
-          ↓
-        PENDING (released)
-```
+Jobs may be `PENDING`, `READY`, `IN_PROGRESS`, `PAUSED`, `BLOCKED`, `COMPLETED`, `FAILED`, or `CANCELLED`. Claiming is transactional, so two workers cannot take the same available job. Every mutation is appended to `jobsmith_work_events` and logged without credentials or invitation tokens.
 
-Every creation, claim, note, progress update, saved session, release, completion, and failure is appended to `work_events`.
-
-## Verification
+## Development verification
 
 ```bash
 bun run format:check
@@ -87,4 +89,4 @@ bun run lint
 bun test
 ```
 
-PostgreSQL integration tests require an isolated `TEST_DATABASE_URL` containing `test` in its name and a unique `TEST_NAMESPACE`.
+No build is needed during development. PostgreSQL integration tests only run when `TEST_DATABASE_URL` contains `test` and `TEST_NAMESPACE` is set to a unique value.

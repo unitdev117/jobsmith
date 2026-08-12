@@ -2,7 +2,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { loadDatabaseConfig } from "../config/index.ts";
 import { createLogger } from "../observability/logger.ts";
-import { createDatabase } from "./pool.ts";
+import { checkDatabase, createDatabase } from "./pool.ts";
 
 export async function migrate(databaseUrl?: string): Promise<void> {
   const config = loadDatabaseConfig(
@@ -17,6 +17,7 @@ export async function migrate(databaseUrl?: string): Promise<void> {
   const log = createLogger("migration");
   const sql = createDatabase(config, log, true);
   try {
+    await checkDatabase(sql, log);
     await sql`CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp())`;
     const directory = join(import.meta.dir, "migrations");
     const files = (await readdir(directory))

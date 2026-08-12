@@ -21,6 +21,46 @@ export async function ask(
   }
 }
 
+export async function askSecret(question: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY)
+    return ask(question, { required: true });
+
+  while (true) {
+    process.stdout.write(`${question} (input hidden): `);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    let value = "";
+    try {
+      while (true) {
+        const chunk = await new Promise<string>((resolve) =>
+          process.stdin.once("data", (data: Buffer) =>
+            resolve(data.toString()),
+          ),
+        );
+        let complete = false;
+        for (const character of chunk) {
+          if (character === "\r" || character === "\n") {
+            complete = true;
+            break;
+          }
+          if (character === "\u0003") throw new Error("Input cancelled");
+          if (character === "\u007f" || character === "\b")
+            value = value.slice(0, -1);
+          else if (character >= " ") value += character;
+        }
+        if (complete) break;
+      }
+    } finally {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\n");
+    }
+    const cleaned = value.trim();
+    if (cleaned) return cleaned;
+    process.stdout.write("This value is required.\n");
+  }
+}
+
 export async function confirm(question: string): Promise<boolean> {
   const answer = (await ask(`${question} [Y/n]`, { defaultValue: "y" }))
     .toLowerCase()

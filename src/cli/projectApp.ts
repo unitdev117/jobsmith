@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { Logger } from "pino";
+import { parse } from "dotenv";
+import { join } from "node:path";
 import {
   loadDatabaseConfig,
   loadHostConfig,
@@ -10,6 +12,7 @@ import { migrate } from "../db/migrate.ts";
 import { checkDatabase, closeDatabase, createDatabase } from "../db/pool.ts";
 import {
   localProjectExists,
+  removeLocalProject,
   writeLocalProject,
   type LocalProject,
 } from "../project/localConfig.ts";
@@ -18,7 +21,7 @@ import {
   ProjectService,
   type JoinRole,
 } from "../services/projectService.ts";
-import { ask, selectMenu } from "./terminal.ts";
+import { ask, askSecret, selectMenu } from "./terminal.ts";
 
 const requiredName = async (question: string): Promise<string> =>
   z
@@ -47,7 +50,26 @@ export async function runInit(log: Logger): Promise<void> {
 }
 
 async function initializeHost(log: Logger): Promise<void> {
-  const config = loadHostConfig();
+  const installationEnvironmentPath = join(import.meta.dir, "../../.env");
+  const installationEnvironment = (await Bun.file(
+    installationEnvironmentPath,
+  ).exists())
+    ? parse(await Bun.file(installationEnvironmentPath).text())
+    : {};
+  const source = { ...installationEnvironment, ...process.env };
+  const databaseUrl =
+    source.DATABASE_URL ?? (await askSecret("PostgreSQL connection URL"));
+  const valkeyUrl =
+    source.VALKEY_URL ??
+    (await ask("Valkey connection URL", {
+      required: true,
+      defaultValue: "redis://127.0.0.1:6379",
+    }));
+  const config = loadHostConfig({
+    ...source,
+    DATABASE_URL: databaseUrl,
+    VALKEY_URL: valkeyUrl,
+  });
   const projectName = await requiredName("Project name");
   const memberName = await requiredName("Your name");
   await migrate(config.DATABASE_URL);
@@ -141,4 +163,34 @@ export async function runConnect(
   } finally {
     await closeDatabase(sql, log);
   }
+}
+
+export async function runRemove(
+  root: string,
+  project: LocalProject,
+  log: Logger,
+): Promise<void> {
+  process.stdout.write(
+    `This will remove Jobsmith initialization from ${root}.\nShared project data will not be deleted.\n`,
+  );
+  const confirmation = (
+    await ask("Are you sure? Type yes to remove")
+  ).toLowerCase();
+  if (confirmation !== "yes") {
+    process.stdout.write("Removal cancelled.\n");
+    return;
+  }
+  await removeLocalProject(root);
+  log.info(
+    {
+      event: "project.local_removed",
+      projectId: project.projectId,
+      memberId: project.memberId,
+      role: project.role,
+    },
+    "Local project initialization removed",
+  );
+  process.stdout.write(
+    "Jobsmith initialization removed. Run `jobsmith init` to initialize this folder again.\n",
+  );
 }

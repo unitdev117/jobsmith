@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import { z } from "zod";
 
@@ -75,4 +75,12 @@ export async function localProjectExists(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+}
+
+export async function removeLocalProject(root: string): Promise<void> {
+  const directory = join(resolve(root), CONFIG_DIRECTORY);
+  const configPath = join(directory, CONFIG_FILE);
+  if (!(await Bun.file(configPath).exists()))
+    throw new Error("This folder is not initialized for Jobsmith");
+  await rm(directory, { recursive: true, force: false });
 }

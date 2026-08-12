@@ -6,7 +6,10 @@ import type { Database } from "../../src/db/pool.ts";
 import { createLogger } from "../../src/observability/logger.ts";
 import type { LocalProject } from "../../src/project/localConfig.ts";
 import { ManualJobService } from "../../src/services/manualJobService.ts";
-import { decodeInvite, ProjectService } from "../../src/services/projectService.ts";
+import {
+  decodeInvite,
+  ProjectService,
+} from "../../src/services/projectService.ts";
 
 const url = process.env.TEST_DATABASE_URL;
 const namespace = process.env.TEST_NAMESPACE;
@@ -122,14 +125,21 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
 
   test("connection strings can be redeemed only once", async () => {
     const host = project(hostId, "Host", "HOST");
-    const projects = new ProjectService(sql, createLogger("invite-integration"));
+    const projects = new ProjectService(
+      sql,
+      createLogger("invite-integration"),
+    );
     const encoded = await projects.createInvite(host, 5);
     const invite = decodeInvite(encoded.value);
-    const joined = await projects.join({ invite, memberName: "Agent", role: "AGENT" });
+    const joined = await projects.join({
+      invite,
+      memberName: "Agent",
+      role: "AGENT",
+    });
     expect(joined.projectId).toBe(projectId);
     expect(joined.role).toBe("AGENT");
-    expect(projects.join({ invite, memberName: "Replay", role: "MEMBER" })).rejects.toThrow(
-      "invalid, expired, or already used",
-    );
+    expect(
+      projects.join({ invite, memberName: "Replay", role: "MEMBER" }),
+    ).rejects.toThrow("invalid, expired, or already used");
   });
 });

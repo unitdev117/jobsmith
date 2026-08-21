@@ -81,6 +81,22 @@ const requireSuccess = (
     );
 };
 
+const clearCache = async (directory: string): Promise<void> => {
+  // Reads must observe other devices' writes; drop the local cache so the
+  // snapshot is refetched from PostgreSQL instead of served within the TTL.
+  await rm(join(directory, ".jobsmith", "cache"), {
+    recursive: true,
+    force: true,
+  });
+};
+
+const readPending = async (
+  directory: string,
+): Promise<Awaited<ReturnType<typeof command>>> => {
+  await clearCache(directory);
+  return command(directory, ["pending"]);
+};
+
 async function withDatabaseRetry<T>(operation: () => Promise<T>): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 6; attempt++) {
@@ -122,6 +138,7 @@ try {
     "jobsmith connect",
     "jobsmith manager",
     "jobsmith worker",
+    "jobsmith update",
     "jobsmith pending",
   ])
     if (!help.stdout.includes(expected))
@@ -216,7 +233,7 @@ try {
   );
   requireSuccess(created, "manager command");
 
-  const pending = await command(joinDirectory, ["pending"]);
+  const pending = await readPending(joinDirectory);
   requireSuccess(pending, "pending command");
   if (
     !pending.stdout.includes("Verify collaboration") ||
@@ -224,11 +241,19 @@ try {
   )
     throw new Error("Joined member did not see the pending job");
 
-  const saved = await command(
+  const claimed = await command(
     joinDirectory,
     ["worker"],
+    [{ prompt: "Select numbers separated by commas", answer: "1" }],
+  );
+  requireSuccess(claimed, "worker claim");
+  if (!claimed.stdout.includes("Run 'jobsmith update' when done."))
+    throw new Error("Worker command did not hand the terminal back");
+
+  const saved = await command(
+    joinDirectory,
+    ["update"],
     [
-      { prompt: "Select a number", answer: "1" },
       { prompt: "Select a number", answer: "1" },
       { prompt: "Progress note", answer: "First implementation note" },
       { prompt: "Select a number", answer: "2" },
@@ -236,67 +261,95 @@ try {
       { prompt: "Select a number", answer: "8" },
     ],
   );
-  requireSuccess(saved, "worker note, progress, and save");
+  requireSuccess(saved, "update note, progress, and save");
   if (!saved.stdout.includes("Work session saved"))
     throw new Error("Worker session was not saved");
 
-  const inProgress = await command(hostDirectory, ["pending"]);
+  const inProgress = await readPending(hostDirectory);
   requireSuccess(inProgress, "pending in-progress view");
   if (!inProgress.stdout.includes("IN_PROGRESS"))
     throw new Error("Pending command omitted the in-progress state");
 
+  requireSuccess(
+    await command(
+      joinDirectory,
+      ["worker"],
+      [{ prompt: "Select numbers separated by commas", answer: "1" }],
+    ),
+    "worker claim before pause",
+  );
   const paused = await command(
     joinDirectory,
-    ["worker"],
+    ["update"],
     [
-      { prompt: "Select a number", answer: "1" },
       { prompt: "Select a number", answer: "3" },
       { prompt: "Pause note", answer: "smoke pause" },
     ],
   );
-  requireSuccess(paused, "worker pause");
-  const pausedView = await command(hostDirectory, ["pending"]);
+  requireSuccess(paused, "update pause");
+  const pausedView = await readPending(hostDirectory);
   if (!pausedView.stdout.includes("PAUSED"))
     throw new Error("Pending command omitted the paused state");
 
+  requireSuccess(
+    await command(
+      joinDirectory,
+      ["worker"],
+      [{ prompt: "Select numbers separated by commas", answer: "1" }],
+    ),
+    "worker claim before block",
+  );
   const blocked = await command(
     joinDirectory,
-    ["worker"],
+    ["update"],
     [
-      { prompt: "Select a number", answer: "1" },
       { prompt: "Select a number", answer: "4" },
       { prompt: "What is blocking", answer: "dependency unavailable" },
     ],
   );
-  requireSuccess(blocked, "worker block");
-  const blockedView = await command(hostDirectory, ["pending"]);
+  requireSuccess(blocked, "update block");
+  const blockedView = await readPending(hostDirectory);
   if (!blockedView.stdout.includes("BLOCKED"))
     throw new Error("Pending command omitted the blocked state");
 
+  requireSuccess(
+    await command(
+      joinDirectory,
+      ["worker"],
+      [{ prompt: "Select numbers separated by commas", answer: "1" }],
+    ),
+    "worker claim before release",
+  );
   const released = await command(
     joinDirectory,
-    ["worker"],
+    ["update"],
     [
-      { prompt: "Select a number", answer: "1" },
       { prompt: "Select a number", answer: "7" },
       { prompt: "Release this job", answer: "y" },
     ],
   );
-  requireSuccess(released, "worker release");
-  const releasedView = await command(hostDirectory, ["pending"]);
+  requireSuccess(released, "update release");
+  const releasedView = await readPending(hostDirectory);
   if (!releasedView.stdout.includes("PENDING"))
     throw new Error("Released work did not return to pending");
 
+  requireSuccess(
+    await command(
+      joinDirectory,
+      ["worker"],
+      [{ prompt: "Select numbers separated by commas", answer: "1" }],
+    ),
+    "worker claim before completion",
+  );
   const completed = await command(
     joinDirectory,
-    ["worker"],
+    ["update"],
     [
-      { prompt: "Select a number", answer: "1" },
       { prompt: "Select a number", answer: "5" },
       { prompt: "Mark this job completed?", answer: "y" },
     ],
   );
-  requireSuccess(completed, "worker completion");
+  requireSuccess(completed, "update completion");
 
   const failedJob = await command(
     hostDirectory,
@@ -311,18 +364,27 @@ try {
     ],
   );
   requireSuccess(failedJob, "second manager command");
+  // The worker's cache predates the host's new job, so drop it before claiming.
+  await clearCache(joinDirectory);
+  requireSuccess(
+    await command(
+      joinDirectory,
+      ["worker"],
+      [{ prompt: "Select numbers separated by commas", answer: "1" }],
+    ),
+    "worker claim before failure",
+  );
   const failed = await command(
     joinDirectory,
-    ["worker"],
+    ["update"],
     [
-      { prompt: "Select a number", answer: "1" },
       { prompt: "Select a number", answer: "6" },
       { prompt: "Failure reason", answer: "Expected smoke-test failure" },
     ],
   );
-  requireSuccess(failed, "worker failure");
+  requireSuccess(failed, "update failure");
 
-  const emptyPending = await command(hostDirectory, ["pending"]);
+  const emptyPending = await readPending(hostDirectory);
   requireSuccess(emptyPending, "empty pending command");
   if (!emptyPending.stdout.includes("No pending jobs"))
     throw new Error("Terminal still showed terminal-state work as pending");
@@ -389,7 +451,7 @@ try {
   if (!cancelledRemoval.stdout.includes("Removal cancelled"))
     throw new Error("Remove accepted a value other than the full word yes");
   requireSuccess(
-    await command(hostDirectory, ["pending"]),
+    await readPending(hostDirectory),
     "command after cancelled removal",
   );
 
@@ -408,7 +470,7 @@ try {
     [{ prompt: "Are you sure?", answer: "yes" }],
   );
   requireSuccess(hostRemoval, "host remove command");
-  const afterRemoval = await command(hostDirectory, ["pending"]);
+  const afterRemoval = await readPending(hostDirectory);
   if (
     afterRemoval.exitCode === 0 ||
     !afterRemoval.stderr.includes("not initialized")
@@ -428,7 +490,7 @@ try {
   reinitializedProjectId = (
     await Bun.file(join(hostDirectory, ".jobsmith", "config.json")).json()
   ).projectId as string;
-  const reinitializedPending = await command(hostDirectory, ["pending"]);
+  const reinitializedPending = await readPending(hostDirectory);
   requireSuccess(reinitializedPending, "reinitialized project isolation");
   if (!reinitializedPending.stdout.includes("No pending jobs"))
     throw new Error("Reinitialized project exposed work from the old project");

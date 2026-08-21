@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import postgres from "postgres";
 import type { Database } from "../../src/db/pool.ts";
 import { createLogger } from "../../src/observability/logger.ts";
+import { readJobs } from "../../src/project/jobCache.ts";
 import type { LocalProject } from "../../src/project/localConfig.ts";
 import { ManualJobService } from "../../src/services/manualJobService.ts";
 import {
@@ -121,6 +123,62 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
     expect(
       await sql`SELECT id FROM jobsmith_work_events WHERE work_item_id=${created.id}`,
     ).toHaveLength(6);
+  });
+
+  test("a cached job still has only one claim winner", async () => {
+    const log = createLogger("claim-cache-integration");
+    const workerTwoId = crypto.randomUUID();
+    await sql`INSERT INTO jobsmith_members(id,project_id,name,role,machine_id)
+      VALUES(${workerTwoId},${projectId},'Worker Two','MEMBER',${crypto.randomUUID()})`;
+    const host = new ManualJobService(
+      sql,
+      project(hostId, "Host", "HOST"),
+      notifier,
+      log,
+    );
+    const first = new ManualJobService(
+      sql,
+      project(workerId, "Worker", "MEMBER"),
+      notifier,
+      log,
+    );
+    const second = new ManualJobService(
+      sql,
+      project(workerTwoId, "Worker Two", "MEMBER"),
+      notifier,
+      log,
+    );
+    const created = await host.create({
+      title: "Race-safe cache claim",
+      description: "Prove cache does not participate in claims",
+      priority: 5,
+      tags: [],
+      dueAt: null,
+    });
+    const roots = [
+      await mkdtemp(join(tmpdir(), "jobsmith-machine-a-")),
+      await mkdtemp(join(tmpdir(), "jobsmith-machine-b-")),
+    ];
+    try {
+      await Promise.all(
+        roots.map((root) => readJobs(root, () => host.listPending())),
+      );
+      const results = await Promise.allSettled([
+        first.claim(created.id),
+        second.claim(created.id),
+      ]);
+      expect(
+        results.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(1);
+      const loser = results.find((result) => result.status === "rejected");
+      expect(loser?.status === "rejected" ? loser.reason.message : "").toBe(
+        "Job is no longer available",
+      );
+    } finally {
+      await Promise.all(
+        roots.map((root) => rm(root, { recursive: true, force: true })),
+      );
+    }
   });
 
   test("connection strings can be redeemed only once", async () => {

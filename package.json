@@ -14,6 +14,7 @@
     "start": "bun run src/index.ts",
     "manager": "bun run src/index.ts manager",
     "worker": "bun run src/index.ts worker",
+    "update": "bun run src/index.ts update",
     "pending": "bun run src/index.ts pending",
     "init": "bun run src/index.ts init",
     "connect": "bun run src/index.ts connect",

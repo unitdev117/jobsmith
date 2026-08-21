@@ -1,6 +1,37 @@
 import Redis from "ioredis";
 import type { Logger } from "pino";
 
+export const eventsChannel = (projectId: string): string =>
+  `jobsmith:${projectId}:events`;
+
+export const presenceKey = (projectId: string, memberId: string): string =>
+  `jobsmith:${projectId}:presence:${memberId}`;
+
+export const presencePattern = (projectId: string): string =>
+  `jobsmith:${projectId}:presence:*`;
+
+export interface PresencePayload {
+  name: string;
+  machineId: string;
+}
+
+export const serializePresence = (name: string, machineId: string): string =>
+  JSON.stringify({ name, machineId });
+
+export const parsePresence = (value: string | null): PresencePayload | null => {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as PresencePayload;
+    if (
+      typeof parsed.name === "string" &&
+      parsed.name.length > 0 &&
+      typeof parsed.machineId === "string"
+    )
+      return parsed;
+  } catch {}
+  return null;
+};
+
 export class ProjectNotifier {
   private readonly client: Redis;
 
@@ -11,7 +42,9 @@ export class ProjectNotifier {
   ) {
     this.client = new Redis(valkeyUrl, {
       lazyConnect: true,
-      maxRetriesPerRequest: 2,
+      connectTimeout: 1_500,
+      retryStrategy: () => null,
+      maxRetriesPerRequest: 1,
       enableReadyCheck: true,
       connectionName: "jobsmith-cli",
     });
@@ -33,7 +66,7 @@ export class ProjectNotifier {
     try {
       if (this.client.status === "wait") await this.client.connect();
       await this.client.publish(
-        `jobsmith:${this.projectId}:events`,
+        eventsChannel(this.projectId),
         JSON.stringify({
           type,
           workItemId,
@@ -45,7 +78,6 @@ export class ProjectNotifier {
         "Project event published",
       );
     } catch (error) {
-      // PostgreSQL is authoritative; a missed wake-up must not undo committed work.
       this.log.warn(
         { event: "valkey.publish_failed", type, workItemId, err: error },
         "Project event was not published",

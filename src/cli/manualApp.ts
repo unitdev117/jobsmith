@@ -1,10 +1,17 @@
 import { z } from "zod";
 import type { LocalProject } from "../project/localConfig.ts";
-import type { ManualJobService } from "../services/manualJobService.ts";
+import { patchSnapshot, readJobs } from "../project/jobCache.ts";
+import { logger } from "../observability/logger.ts";
+import type {
+  ManualJob,
+  ManualJobService,
+} from "../services/manualJobService.ts";
 import {
   ask,
   confirm,
+  deadlineLabel,
   jobSummary,
+  multiSelectMenu,
   pendingTable,
   priorityLabel,
   selectMenu,
@@ -17,17 +24,40 @@ const priorities = [
   { value: 2, label: "Low — handle when capacity allows" },
 ] as const;
 
-function parseDueDate(value: string): Date | null {
+async function updateCache(action: () => Promise<void>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    logger.warn(
+      {
+        event: "job_cache.patch_failed",
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      },
+      "Committed change could not be cached",
+    );
+  }
+}
+
+export function parseDueDate(value: string): Date | null {
   if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime()))
-    throw new Error("Use YYYY-MM-DD or an ISO date/time");
+  if (!/^\d{8}$/.test(value)) throw new Error("Use DDMMYYYY");
+  const day = Number(value.slice(0, 2));
+  const month = Number(value.slice(2, 4));
+  const year = Number(value.slice(4, 8));
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCDate() !== day ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCFullYear() !== year
+  )
+    throw new Error("Use a valid DDMMYYYY date");
   return date;
 }
 
 export async function runManager(
   service: ManualJobService,
   project: LocalProject,
+  root: string,
 ): Promise<void> {
   process.stdout.write(
     `\nJOBSMITH / ${project.projectName} / MANAGER / NEW JOB\n\n`,
@@ -54,7 +84,7 @@ export async function runManager(
   let dueAt: Date | null = null;
   while (true) {
     try {
-      dueAt = parseDueDate(await ask("Due date (optional, YYYY-MM-DD)"));
+      dueAt = parseDueDate(await ask("Due date (optional, DDMMYYYY)"));
       break;
     } catch (error) {
       process.stdout.write(
@@ -68,7 +98,7 @@ export async function runManager(
     .filter(Boolean)
     .slice(0, 20);
   process.stdout.write(
-    `\nName: ${title}\nPriority: ${priorityLabel(priority.value)}\nDue: ${dueAt?.toISOString() ?? "not set"}\nTags: ${tags.join(", ") || "none"}\nDescription: ${description}\n\n`,
+    `\nName: ${title}\nPriority: ${priorityLabel(priority.value)}\nDeadline: ${deadlineLabel(dueAt)}\nTags: ${tags.join(", ") || "none"}\nDescription: ${description}\n\n`,
   );
   if (!(await confirm("Create this job?"))) {
     process.stdout.write("Job creation cancelled.\n");
@@ -81,38 +111,78 @@ export async function runManager(
     tags,
     dueAt,
   });
+  await updateCache(() =>
+    patchSnapshot(
+      root,
+      (jobs) => [job, ...jobs],
+      () => service.listPending(),
+    ),
+  );
+  logger.info(
+    { event: "cache.manager_patched", jobId: job.id },
+    "Created job cached",
+  );
   process.stdout.write(`\nCreated ${job.id}\n${jobSummary(job)}\n`);
 }
 
-export async function runPending(service: ManualJobService): Promise<void> {
-  process.stdout.write(`${pendingTable(await service.listPending())}\n`);
+export async function runPending(
+  service: ManualJobService,
+  root: string,
+): Promise<void> {
+  const result = await readJobs(root, () => service.listPending());
+  process.stdout.write(
+    `${pendingTable(result.jobs, {
+      syncedAt: result.fetchedAt,
+      fromCache: result.fromCache,
+      offline: result.offline,
+    })}\n`,
+  );
 }
 
-export async function runWorker(
-  service: ManualJobService,
-  project: LocalProject,
-): Promise<void> {
-  process.stdout.write(
-    `\nJOBSMITH / ${project.projectName} / WORKER / ${project.memberName}\n\n`,
-  );
-  const available = await service.listForWorker();
-  if (!available.length) {
-    process.stdout.write("No jobs are currently available.\n");
-    return;
-  }
-  const selected = await selectMenu(
-    "Choose a job",
-    available,
-    (job) =>
-      `${job.assignedWorkerName === project.memberName ? job.state : priorityLabel(job.priority)}  ${job.title}  ${job.progressPercent}%`,
-  );
-  if (!selected) {
-    process.stdout.write("No job selected.\n");
-    return;
-  }
-  const job = await service.claim(selected.id);
-  process.stdout.write(`Claimed ${job.id}.\n`);
+const activeStates = new Set(["IN_PROGRESS", "PAUSED", "BLOCKED"]);
 
+export function jobsForWorker(
+  jobs: ManualJob[],
+  project: LocalProject,
+): ManualJob[] {
+  return jobs.filter(
+    (job) =>
+      ((job.state === "PENDING" || job.state === "READY") &&
+        job.assignedWorkerName === null) ||
+      (activeStates.has(job.state) &&
+        job.assignedWorkerName === project.memberName),
+  );
+}
+
+export function resolveUpdateJobs(
+  jobs: ManualJob[],
+  query?: string,
+): ManualJob[] {
+  if (!query) return jobs;
+  const needle = query.toLowerCase();
+  const byId = jobs.filter((job) => job.id === query);
+  if (byId.length) return byId;
+  const exact = jobs.filter((job) => job.title.toLowerCase() === needle);
+  if (exact.length) return exact;
+  const prefix = jobs.filter((job) =>
+    job.title.toLowerCase().startsWith(needle),
+  );
+  if (prefix.length) return prefix;
+  return jobs.filter((job) => job.title.toLowerCase().includes(needle));
+}
+
+const patchJob = (
+  jobs: ManualJob[],
+  id: string,
+  change: Partial<ManualJob>,
+): ManualJob[] =>
+  jobs.map((job) => (job.id === id ? { ...job, ...change } : job));
+
+export async function runJobUpdateMenu(
+  service: ManualJobService,
+  job: ManualJob,
+  root: string,
+): Promise<void> {
   while (true) {
     const action = await selectMenu(
       `${jobSummary(job)}\n\nWhat do you want to update?`,
@@ -131,7 +201,7 @@ export async function runWorker(
     if (!action || action === "Save and exit") {
       await service.saveSession(job.id);
       process.stdout.write(
-        "Work session saved. Run `jobsmith worker` to resume.\n",
+        "Work session saved. Run `jobsmith update` to resume.\n",
       );
       return;
     }
@@ -143,7 +213,9 @@ export async function runWorker(
         .parse(await ask("Progress note", { required: true }));
       await service.addNote(job.id, note);
       process.stdout.write("Progress note saved.\n");
-    } else if (action === "Set progress percentage") {
+      continue;
+    }
+    if (action === "Set progress percentage") {
       const progress = z.coerce
         .number()
         .int()
@@ -157,42 +229,178 @@ export async function runWorker(
         );
       await service.setProgress(job.id, progress);
       job.progressPercent = progress;
+      await updateCache(() =>
+        patchSnapshot(
+          root,
+          (jobs) => patchJob(jobs, job.id, { progressPercent: progress }),
+          () => service.listPending(),
+        ),
+      );
       process.stdout.write(`Progress updated to ${progress}%.\n`);
-    } else if (action === "Pause work") {
-      const note = await ask("Pause note (optional)");
-      await service.transition(job.id, "PAUSED", note || undefined);
-      process.stdout.write("Job paused. Run `jobsmith worker` to resume.\n");
-      return;
+      continue;
+    }
+    let outcome: "PAUSED" | "BLOCKED" | "COMPLETED" | "FAILED" | "PENDING";
+    let message: string | undefined;
+    if (action === "Pause work") {
+      outcome = "PAUSED";
+      message = (await ask("Pause note (optional)")) || undefined;
     } else if (action === "Mark blocked") {
-      const reason = z
+      outcome = "BLOCKED";
+      message = z
         .string()
         .min(1)
         .max(4000)
         .parse(await ask("What is blocking the work?", { required: true }));
-      await service.transition(job.id, "BLOCKED", reason);
-      process.stdout.write(
-        "Job marked blocked. Run `jobsmith worker` to resume it.\n",
-      );
-      return;
     } else if (action === "Mark completed") {
       if (!(await confirm("Mark this job completed?"))) continue;
-      await service.transition(job.id, "COMPLETED");
-      process.stdout.write("Job completed.\n");
-      return;
+      outcome = "COMPLETED";
     } else if (action === "Mark failed") {
-      const reason = z
+      outcome = "FAILED";
+      message = z
         .string()
         .min(1)
         .max(4000)
         .parse(await ask("Failure reason", { required: true }));
-      await service.transition(job.id, "FAILED", reason);
-      process.stdout.write("Job marked failed.\n");
-      return;
-    } else if (action === "Release back to pending") {
+    } else {
       if (!(await confirm("Release this job for another worker?"))) continue;
-      await service.transition(job.id, "PENDING");
-      process.stdout.write("Job released.\n");
-      return;
+      outcome = "PENDING";
     }
+    await service.transition(job.id, outcome, message);
+    await updateCache(() =>
+      patchSnapshot(
+        root,
+        (jobs) =>
+          outcome === "COMPLETED" || outcome === "FAILED"
+            ? jobs.filter((candidate) => candidate.id !== job.id)
+            : patchJob(jobs, job.id, {
+                state: outcome,
+                assignedWorkerName:
+                  outcome === "PENDING" ? null : job.assignedWorkerName,
+                blockedReason:
+                  outcome === "BLOCKED" ? (message ?? "Blocked") : null,
+              }),
+        () => service.listPending(),
+      ),
+    );
+    logger.info(
+      { event: "cache.job_transition_patched", jobId: job.id, outcome },
+      "Job transition cached",
+    );
+    process.stdout.write(
+      outcome === "COMPLETED"
+        ? "Job completed.\n"
+        : outcome === "FAILED"
+          ? "Job marked failed.\n"
+          : outcome === "PENDING"
+            ? "Job released.\n"
+            : outcome === "BLOCKED"
+              ? "Job marked blocked. Run `jobsmith update` to resume it.\n"
+              : "Job paused. Run `jobsmith update` to resume.\n",
+    );
+    return;
   }
+}
+
+export async function runWorker(
+  service: ManualJobService,
+  project: LocalProject,
+  root: string,
+): Promise<void> {
+  process.stdout.write(
+    `\nJOBSMITH / ${project.projectName} / WORKER / ${project.memberName}\n\n`,
+  );
+  const result = await readJobs(root, () => service.listPending());
+  const available = jobsForWorker(result.jobs, project);
+  if (!available.length) {
+    process.stdout.write("No jobs are currently available.\n");
+    return;
+  }
+  const selected = await multiSelectMenu(
+    "Choose one or more jobs",
+    available,
+    (job) =>
+      `${job.assignedWorkerName === project.memberName ? job.state : priorityLabel(job.priority)}  ${job.title}  ${job.progressPercent}%`,
+  );
+  if (!selected.length) {
+    process.stdout.write("No job selected.\n");
+    return;
+  }
+  const claimed: ManualJob[] = [];
+  for (const candidate of selected) {
+    let job: ManualJob;
+    try {
+      job = await service.claim(candidate.id);
+    } catch (error) {
+      logger.warn(
+        { event: "worker.claim_failed", jobId: candidate.id },
+        "Job claim failed",
+      );
+      process.stderr.write(
+        `${candidate.title}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      continue;
+    }
+    claimed.push(job);
+    await updateCache(() =>
+      patchSnapshot(
+        root,
+        (jobs) => [job, ...jobs.filter((item) => item.id !== job.id)],
+        () => service.listPending(),
+      ),
+    );
+    process.stdout.write(`Claimed ${job.id}.\n${jobSummary(job)}\n\n`);
+  }
+  if (!claimed.length) return;
+  process.stdout.write(
+    claimed.length === 1
+      ? "Run 'jobsmith update' when done.\n"
+      : "Run 'jobsmith update \"<Job Name>\"' to update one, or 'jobsmith update' when only one is active.\n",
+  );
+}
+
+export async function runUpdate(
+  service: ManualJobService,
+  project: LocalProject,
+  root: string,
+  query?: string,
+): Promise<void> {
+  const result = await readJobs(root, () => service.listPending());
+  const owned = result.jobs.filter(
+    (job) =>
+      activeStates.has(job.state) &&
+      job.assignedWorkerName === project.memberName,
+  );
+  const matches = resolveUpdateJobs(owned, query);
+  if (!matches.length)
+    throw new Error(
+      "No claimed job found. Run `jobsmith worker` to claim work first",
+    );
+  const job =
+    matches.length === 1
+      ? matches[0]!
+      : await selectMenu(
+          "Choose a job to update",
+          matches,
+          (candidate) => `${candidate.state}  ${candidate.title}`,
+        );
+  if (!job) {
+    process.stdout.write("No job selected.\n");
+    return;
+  }
+  logger.info(
+    { event: "update.job_resolved", jobId: job.id },
+    "Job selected for update",
+  );
+  if (job.state !== "IN_PROGRESS") {
+    const resumed = await service.claim(job.id);
+    Object.assign(job, resumed);
+    await updateCache(() =>
+      patchSnapshot(
+        root,
+        (jobs) => [resumed, ...jobs.filter((item) => item.id !== resumed.id)],
+        () => service.listPending(),
+      ),
+    );
+  }
+  await runJobUpdateMenu(service, job, root);
 }

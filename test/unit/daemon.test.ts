@@ -34,6 +34,7 @@ const job: ManualJob = {
   priority: 5,
   state: "PENDING",
   progressPercent: 0,
+  assignedMemberId: null,
   assignedWorkerName: null,
   tags: [],
   dueAt: null,
@@ -114,7 +115,7 @@ async function buildHarness(
       log,
       fetchJobs: async () => {
         harness.fetchCalls++;
-        return [job];
+        return { jobs: [job], truncated: false };
       },
       client: client.client,
       channel: "jobsmith:p:events",
@@ -122,6 +123,7 @@ async function buildHarness(
       presenceValue: JSON.stringify({ name: "Me", machineId: "machine-1" }),
       presenceTtlSeconds: PRESENCE_TTL_SECONDS,
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      refreshDebounceMs: 0,
       schedule: (callback) => {
         harness.timers.push(callback);
         return () => {
@@ -175,16 +177,42 @@ describe("daemon body", () => {
     expect(harness.client.state.presence[1]?.ttl).toBe(PRESENCE_TTL_SECONDS);
   });
 
-  test("refreshes the cache exactly once per incoming event", async () => {
+  test("coalesces a burst of events into a single refresh", async () => {
     const directory = await root();
     const harness = await buildHarness(directory);
     await runDaemon(harness.runtime);
     expect(harness.fetchCalls).toBe(1);
     harness.client.state.messageHandler!("jobsmith:p:events", "{}");
-    await flush();
+    harness.client.state.messageHandler!("jobsmith:p:events", "{}");
     harness.client.state.messageHandler!("jobsmith:p:events", "{}");
     await flush();
-    expect(harness.fetchCalls).toBe(3);
+    expect(harness.fetchCalls).toBe(2);
+    await harness.signalHandler!("SIGTERM");
+    harness.client.state.messageHandler!("jobsmith:p:events", "{}");
+    await flush();
+    expect(harness.fetchCalls).toBe(2);
+  });
+
+  test("subscribes before the initial fetch so startup events are kept", async () => {
+    const directory = await root();
+    const order: string[] = [];
+    const inner = fakeClient();
+    const client: ValkeyClient = {
+      ...inner.client,
+      subscribe: async (channel) => {
+        order.push("subscribe");
+        await inner.client.subscribe(channel);
+      },
+    };
+    const harness = await buildHarness(directory, {
+      client,
+      fetchJobs: async () => {
+        order.push("fetch");
+        return { jobs: [job], truncated: false };
+      },
+    });
+    await runDaemon(harness.runtime);
+    expect(order).toEqual(["subscribe", "fetch"]);
   });
 
   test("closes the connection and stops the heartbeat on shutdown", async () => {

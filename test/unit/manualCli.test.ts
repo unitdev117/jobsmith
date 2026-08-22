@@ -20,6 +20,7 @@ const job: ManualJob = {
   priority: 7,
   state: "PENDING",
   progressPercent: 0,
+  assignedMemberId: null,
   assignedWorkerName: null,
   tags: ["release", "docs"],
   dueAt: new Date("2026-08-20T00:00:00.000Z"),
@@ -104,15 +105,49 @@ describe("manual CLI presentation", () => {
   });
 
   test("filters the worker list to unclaimed and own active jobs", () => {
+    const mine = project.memberId;
+    const other = "55555555-5555-4555-8555-555555555555";
     const jobs: ManualJob[] = [
       job,
       { ...job, id: "a", state: "READY" },
-      { ...job, id: "b", state: "IN_PROGRESS", assignedWorkerName: "Me" },
-      { ...job, id: "c", state: "PAUSED", assignedWorkerName: "Me" },
-      { ...job, id: "d", state: "BLOCKED", assignedWorkerName: "Other" },
-      { ...job, id: "e", state: "IN_PROGRESS", assignedWorkerName: "Other" },
+      {
+        ...job,
+        id: "b",
+        state: "IN_PROGRESS",
+        assignedMemberId: mine,
+        assignedWorkerName: project.memberName,
+      },
+      {
+        ...job,
+        id: "c",
+        state: "PAUSED",
+        assignedMemberId: mine,
+        assignedWorkerName: project.memberName,
+      },
+      // Same display name, different member id: must stay hidden now that
+      // ownership matches on id.
+      {
+        ...job,
+        id: "d",
+        state: "BLOCKED",
+        assignedMemberId: other,
+        assignedWorkerName: project.memberName,
+      },
+      {
+        ...job,
+        id: "e",
+        state: "IN_PROGRESS",
+        assignedMemberId: other,
+        assignedWorkerName: "Other",
+      },
       { ...job, id: "f", state: "COMPLETED" },
-      { ...job, id: "g", state: "PENDING", assignedWorkerName: "Other" },
+      {
+        ...job,
+        id: "g",
+        state: "PENDING",
+        assignedMemberId: other,
+        assignedWorkerName: "Other",
+      },
     ];
     expect(jobsForWorker(jobs, project).map((item) => item.id)).toEqual([
       job.id,

@@ -119,6 +119,11 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error: unknown) => {
+  if (error instanceof Error && error.message === "Input cancelled") {
+    process.stdout.write("\nCancelled.\n");
+    process.exitCode = 130;
+    return;
+  }
   let message = error instanceof Error ? error.message : String(error);
   if (!message && error instanceof AggregateError) {
     const cause = error.errors.find(

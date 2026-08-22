@@ -11,11 +11,12 @@ import { closeDatabase, createDatabase } from "../db/pool.ts";
 import { createLogger } from "../observability/logger.ts";
 import { findLocalProject, type LocalProject } from "../project/localConfig.ts";
 import { refreshJobs } from "../project/jobCache.ts";
-import type { ManualJob } from "../services/manualJobService.ts";
+import type { PendingFetch } from "../services/manualJobService.ts";
 import { ManualJobService } from "../services/manualJobService.ts";
 
 export const PRESENCE_TTL_SECONDS = 60;
 export const HEARTBEAT_INTERVAL_MS = 30_000;
+export const REFRESH_DEBOUNCE_MS = 300;
 
 export interface ValkeyClient {
   subscribe(channel: string): Promise<void>;
@@ -27,20 +28,21 @@ export interface ValkeyClient {
 export interface DaemonRuntime {
   root: string;
   log: Logger;
-  fetchJobs: () => Promise<ManualJob[]>;
+  fetchJobs: () => Promise<PendingFetch>;
   client: ValkeyClient;
   channel: string;
   presenceKey: string;
   presenceValue: string;
   presenceTtlSeconds: number;
   heartbeatIntervalMs: number;
+  refreshDebounceMs: number;
   schedule: (callback: () => void, intervalMs: number) => () => void;
   onSignal: (handler: (signal: string) => void | Promise<void>) => void;
 }
 
 export async function refreshCache(
   root: string,
-  fetchJobs: () => Promise<ManualJob[]>,
+  fetchJobs: () => Promise<PendingFetch>,
   log: Logger,
 ): Promise<void> {
   try {
@@ -68,15 +70,21 @@ export async function runDaemon(runtime: DaemonRuntime): Promise<void> {
     presenceValue,
     presenceTtlSeconds,
     heartbeatIntervalMs,
+    refreshDebounceMs,
     schedule,
     onSignal,
   } = runtime;
 
   let stopped = false;
   let stopHeartbeat = (): void => undefined;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   const stop = async (signal: string): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     stopHeartbeat();
     try {
       await client.close();
@@ -89,8 +97,6 @@ export async function runDaemon(runtime: DaemonRuntime): Promise<void> {
     log.info({ event: "daemon.stopped", signal }, "Daemon stopped");
   };
   onSignal(stop);
-
-  await refreshCache(root, fetchJobs, log);
 
   const beat = async (): Promise<void> => {
     try {
@@ -108,9 +114,23 @@ export async function runDaemon(runtime: DaemonRuntime): Promise<void> {
     void beat();
   }, heartbeatIntervalMs);
 
+  // Pub/sub misses anything published before we listen, so subscribe first.
   let refreshQueue = Promise.resolve();
+
+  // Debounce bursts into one refresh; each one opens a fresh DB connection.
+  const scheduleDebouncedRefresh = (): void => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      // Back-to-back, never in parallel.
+      refreshQueue = refreshQueue.then(() =>
+        refreshCache(root, fetchJobs, log),
+      );
+    }, refreshDebounceMs);
+  };
+
   client.onMessage(() => {
-    refreshQueue = refreshQueue.then(() => refreshCache(root, fetchJobs, log));
+    if (!stopped) scheduleDebouncedRefresh();
   });
   try {
     await client.subscribe(channel);
@@ -119,6 +139,7 @@ export async function runDaemon(runtime: DaemonRuntime): Promise<void> {
     await stop("subscribe_failed");
     throw error;
   }
+  await refreshCache(root, fetchJobs, log);
 }
 
 export function createValkeyClient(
@@ -155,7 +176,7 @@ export function createValkeyClient(
 export function createFetchJobs(
   config: LocalProject,
   log: Logger,
-): () => Promise<ManualJob[]> {
+): () => Promise<PendingFetch> {
   return async () => {
     const databaseConfig = loadDatabaseConfig({
       ...process.env,
@@ -192,6 +213,7 @@ export function defaultRuntime(
     presenceValue: serializePresence(config.memberName, config.machineId),
     presenceTtlSeconds: PRESENCE_TTL_SECONDS,
     heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+    refreshDebounceMs: REFRESH_DEBOUNCE_MS,
     schedule: (callback, intervalMs) => {
       const id = setInterval(callback, intervalMs);
       return () => clearInterval(id);

@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Redis from "ioredis";
-import { eventsChannel, presenceKey } from "../../src/coordination/valkey.ts";
+import {
+  eventsChannel,
+  presenceKey,
+  ProjectNotifier,
+} from "../../src/coordination/valkey.ts";
 import {
   createValkeyClient,
   runDaemon,
@@ -24,6 +28,7 @@ const job = (id: string): ManualJob => ({
   priority: 5,
   state: "PENDING",
   progressPercent: 0,
+  assignedMemberId: null,
   assignedWorkerName: null,
   tags: [],
   dueAt: null,
@@ -75,7 +80,7 @@ describe.skipIf(!enabled)("Valkey realtime layer", () => {
       log,
       fetchJobs: async () => {
         fetchCount++;
-        return [job(`job-${fetchCount}`)];
+        return { jobs: [job(`job-${fetchCount}`)], truncated: false };
       },
       client,
       channel,
@@ -88,6 +93,7 @@ describe.skipIf(!enabled)("Valkey realtime layer", () => {
       // not refresh presence during the test.
       presenceTtlSeconds: 1,
       heartbeatIntervalMs: 60_000,
+      refreshDebounceMs: 0,
       schedule: (callback, intervalMs) => {
         const id = setInterval(callback, intervalMs);
         stopHeartbeat = () => clearInterval(id);
@@ -134,5 +140,27 @@ describe.skipIf(!enabled)("Valkey realtime layer", () => {
     );
     await waitFor(() => fetchCount === second + 1);
     expect(fetchCount).toBe(second + 1);
+  });
+
+  test("the CLI notifier publishes again after its connection drops", async () => {
+    const notifier = new ProjectNotifier(url!, projectId, log);
+    const listener = publisher.duplicate();
+    await listener.subscribe(channel);
+    let received = false;
+    listener.on("message", () => {
+      received = true;
+    });
+
+    // Closing the notifier must not disable later publishes.
+    await notifier.check();
+    await notifier.close();
+    await notifier.publish("work.updated");
+
+    try {
+      await waitFor(() => received);
+    } finally {
+      listener.disconnect();
+      await notifier.close();
+    }
   });
 });

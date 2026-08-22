@@ -1,3 +1,4 @@
+-- Baseline schema. Numbering starts at 0002; never rename applied migrations.
 CREATE TABLE IF NOT EXISTS jobsmith_projects (
   id uuid PRIMARY KEY,
   name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),

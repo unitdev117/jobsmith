@@ -4,13 +4,16 @@ import { loadDatabaseConfig } from "../config/index.ts";
 import { createLogger } from "../observability/logger.ts";
 import { checkDatabase, createDatabase } from "./pool.ts";
 
-export async function migrate(databaseUrl?: string): Promise<void> {
+export async function migrate(
+  databaseUrl?: string,
+  migrationUrl?: string,
+): Promise<void> {
   const config = loadDatabaseConfig(
     databaseUrl
       ? {
           ...process.env,
           DATABASE_URL: databaseUrl,
-          DATABASE_MIGRATION_URL: undefined,
+          DATABASE_MIGRATION_URL: migrationUrl,
         }
       : process.env,
   );

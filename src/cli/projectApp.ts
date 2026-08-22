@@ -49,14 +49,18 @@ export async function runInit(log: Logger): Promise<void> {
   else await joinProject(log);
 }
 
-async function initializeHost(log: Logger): Promise<void> {
-  const installationEnvironmentPath = join(import.meta.dir, "../../.env");
-  const installationEnvironment = (await Bun.file(
-    installationEnvironmentPath,
-  ).exists())
-    ? parse(await Bun.file(installationEnvironmentPath).text())
+async function installationSource(): Promise<
+  Record<string, string | undefined>
+> {
+  const path = join(import.meta.dir, "../../.env");
+  const installation = (await Bun.file(path).exists())
+    ? parse(await Bun.file(path).text())
     : {};
-  const source = { ...installationEnvironment, ...process.env };
+  return { ...installation, ...process.env };
+}
+
+async function initializeHost(log: Logger): Promise<void> {
+  const source = await installationSource();
   const databaseUrl =
     source.DATABASE_URL ?? (await askSecret("PostgreSQL connection URL"));
   const valkeyUrl =
@@ -72,7 +76,7 @@ async function initializeHost(log: Logger): Promise<void> {
   });
   const projectName = await requiredName("Project name");
   const memberName = await requiredName("Your name");
-  await migrate(config.DATABASE_URL);
+  await migrate(config.DATABASE_URL, config.DATABASE_MIGRATION_URL);
   const sql = createDatabase(config, log);
   const notifier = new ProjectNotifier(config.VALKEY_URL, "initializing", log);
   try {
@@ -155,7 +159,7 @@ export async function runConnect(
     await checkDatabase(sql, log);
     const invite = await new ProjectService(sql, log).createInvite(
       project,
-      loadInviteTtl(),
+      loadInviteTtl(await installationSource()),
     );
     process.stdout.write(
       `\nConnection string (one use; expires ${invite.expiresAt.toISOString()}):\n${invite.value}\n\nTreat this connection string as a secret.\n`,

@@ -222,7 +222,12 @@ function ageLabel(syncedAt: Date): string {
 
 export function pendingTable(
   jobs: readonly ManualJob[],
-  options: { syncedAt?: Date; fromCache?: boolean; offline?: boolean } = {},
+  options: {
+    syncedAt?: Date;
+    fromCache?: boolean;
+    offline?: boolean;
+    truncated?: boolean;
+  } = {},
 ): string {
   const status = options.syncedAt
     ? options.offline
@@ -251,6 +256,9 @@ export function pendingTable(
     line(headers),
     widths.map((width) => "─".repeat(width)).join("  "),
     ...rows.map(line),
+    ...(options.truncated
+      ? [`(showing first ${jobs.length} active jobs)`]
+      : []),
     status,
   ]
     .filter((value): value is string => value !== null)

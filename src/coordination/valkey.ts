@@ -34,6 +34,7 @@ export const parsePresence = (value: string | null): PresencePayload | null => {
 
 export class ProjectNotifier {
   private readonly client: Redis;
+  private connectPromise: Promise<void> | null = null;
 
   constructor(
     valkeyUrl: string,
@@ -56,15 +57,31 @@ export class ProjectNotifier {
     );
   }
 
+  // Lazy clients sit in "wait"; a failed attempt leaves "end". connect()
+  // works from both, so one outage only skips one notification.
+  private ensureConnected(): Promise<void> {
+    const status = this.client.status;
+    if (status === "connect" || status === "ready") return Promise.resolve();
+    if (!this.connectPromise) {
+      this.connectPromise = this.client
+        .connect()
+        .then(() => undefined)
+        .finally(() => {
+          this.connectPromise = null;
+        });
+    }
+    return this.connectPromise;
+  }
+
   async check(): Promise<void> {
-    if (this.client.status === "wait") await this.client.connect();
+    await this.ensureConnected();
     await this.client.ping();
     this.log.info({ event: "valkey.ready" }, "Valkey is ready");
   }
 
   async publish(type: string, workItemId?: string): Promise<void> {
     try {
-      if (this.client.status === "wait") await this.client.connect();
+      await this.ensureConnected();
       await this.client.publish(
         eventsChannel(this.projectId),
         JSON.stringify({

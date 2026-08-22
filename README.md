@@ -79,7 +79,9 @@ jobsmith update
 jobsmith update "Job name"
 ```
 
-Reports notes, progress, pauses, blockers, completion, failure, or release for claimed work. A name can be an exact title, unique prefix, or substring.
+Reports notes, progress, pauses, blockers, completion, failure, or release for claimed work. A name can be an exact title, unique prefix, or substring. If no claimed job matches the name, Jobsmith offers to cancel an unclaimed job with that title instead.
+
+The update menu also lets a worker cancel their own claimed job permanently. Unclaimed pending jobs can be cancelled by any member through the same name lookup.
 
 ```bash
 jobsmith pending
@@ -105,7 +107,7 @@ Lists which workers/devices are currently online from Valkey presence keys. With
 
 ## States
 
-Jobs may be `PENDING`, `READY`, `IN_PROGRESS`, `PAUSED`, `BLOCKED`, `COMPLETED`, `FAILED`, or `CANCELLED`. Claiming is transactional, so two workers cannot take the same available job. Every mutation is appended to `jobsmith_work_events` and logged without credentials or invitation tokens.
+Jobs may be `PENDING`, `READY`, `IN_PROGRESS`, `PAUSED`, `BLOCKED`, `COMPLETED`, `FAILED`, or `CANCELLED`. Claiming is transactional, so two workers cannot take the same available job; multi-select claims run in one transaction and report per-job failures. Every mutation is appended to `jobsmith_work_events` and logged without credentials or invitation tokens.
 
 ## Development verification
 
@@ -117,5 +119,7 @@ bun test
 ```
 
 No build is needed during development. PostgreSQL integration tests only run when `TEST_DATABASE_URL` contains `test` and `TEST_NAMESPACE` is set to a unique value; the Valkey realtime integration test runs when `TEST_VALKEY_URL` points at a live Valkey.
+
+Migration files are numbered from `0002` because the original baseline was consolidated into one file before the first release; applied migrations are recorded by filename, so never rename them.
 
 For faster cold starts on Neon free tier, use the `-pooler` (PgBouncer) endpoint in your connection string.

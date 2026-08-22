@@ -21,12 +21,23 @@ export interface ManualJob {
   priority: number;
   state: WorkState;
   progressPercent: number;
+  assignedMemberId: string | null;
   assignedWorkerName: string | null;
   tags: string[];
   dueAt: Date | null;
   blockedReason: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface PendingFetch {
+  jobs: ManualJob[];
+  truncated: boolean;
+}
+
+export interface ClaimFailure {
+  id: string;
+  reason: string;
 }
 
 interface ManualJobRow {
@@ -36,6 +47,7 @@ interface ManualJobRow {
   priority: number;
   state: WorkState;
   progress_percent: number;
+  assigned_member_id: string | null;
   assigned_worker_name: string | null;
   tags: string[];
   due_at: Date | null;
@@ -51,6 +63,7 @@ const mapJob = (row: ManualJobRow): ManualJob => ({
   priority: row.priority,
   state: row.state,
   progressPercent: row.progress_percent,
+  assignedMemberId: row.assigned_member_id,
   assignedWorkerName: row.assigned_worker_name,
   tags: row.tags,
   dueAt: row.due_at,
@@ -60,7 +73,11 @@ const mapJob = (row: ManualJobRow): ManualJob => ({
 });
 
 const fields = `id,title,description,priority,status AS state,progress_percent,
-  assigned_worker_name,tags,due_at,blocked_reason,created_at,updated_at`;
+  assigned_member_id,assigned_worker_name,tags,due_at,blocked_reason,created_at,updated_at`;
+
+export const ACTIVE_STATES = ["IN_PROGRESS", "PAUSED", "BLOCKED"] as const;
+
+export const DEFAULT_PENDING_LIMIT = 100;
 
 export class ManualJobService {
   constructor(
@@ -104,53 +121,48 @@ export class ManualJobService {
     return job;
   }
 
-  async listPending(limit = 100): Promise<ManualJob[]> {
+  async listPending(limit = DEFAULT_PENDING_LIMIT): Promise<PendingFetch> {
     const rows = await this.sql<ManualJobRow[]>`
       SELECT ${this.sql.unsafe(fields)} FROM jobsmith_work_items
       WHERE project_id=${this.project.projectId}
         AND status IN ('PENDING','READY','IN_PROGRESS','PAUSED','BLOCKED')
       ORDER BY CASE status WHEN 'BLOCKED' THEN 0 WHEN 'IN_PROGRESS' THEN 1 ELSE 2 END,
-        priority DESC,created_at LIMIT ${limit}`;
-    return rows.map(mapJob);
+        priority DESC,created_at LIMIT ${limit + 1}`;
+    return {
+      jobs: rows.slice(0, limit).map(mapJob),
+      truncated: rows.length > limit,
+    };
   }
 
-  async listForWorker(limit = 100): Promise<ManualJob[]> {
-    const rows = await this.sql<ManualJobRow[]>`
-      SELECT ${this.sql.unsafe(fields)} FROM jobsmith_work_items
-      WHERE project_id=${this.project.projectId} AND (
-        (status IN ('PENDING','READY') AND assigned_member_id IS NULL) OR
-        (status IN ('IN_PROGRESS','PAUSED','BLOCKED') AND assigned_member_id=${this.project.memberId})
-      )
-      ORDER BY CASE WHEN assigned_member_id=${this.project.memberId} THEN 0 ELSE 1 END,
-        priority DESC,created_at LIMIT ${limit}`;
-    return rows.map(mapJob);
+  private async claimInTx(tx: Database, id: string): Promise<ManualJob> {
+    const targets = await tx<
+      { status: WorkState; assigned_member_id: string | null }[]
+    >`
+      SELECT status,assigned_member_id FROM jobsmith_work_items
+      WHERE id=${id} AND project_id=${this.project.projectId} FOR UPDATE`;
+    const target = targets[0];
+    const available =
+      target &&
+      ((["PENDING", "READY"].includes(target.status) &&
+        target.assigned_member_id === null) ||
+        (["IN_PROGRESS", "PAUSED", "BLOCKED"].includes(target.status) &&
+          target.assigned_member_id === this.project.memberId));
+    if (!available || !target) throw new Error("Job is no longer available");
+    const rows = await tx<ManualJobRow[]>`
+      UPDATE jobsmith_work_items SET status='IN_PROGRESS',assigned_member_id=${this.project.memberId},
+        assigned_worker_name=${this.project.memberName},blocked_reason=NULL,
+        started_at=COALESCE(started_at,clock_timestamp()),version=version+1,updated_at=clock_timestamp()
+      WHERE id=${id} AND project_id=${this.project.projectId}
+      RETURNING ${tx.unsafe(fields)}`;
+    await tx`INSERT INTO jobsmith_work_events(project_id,work_item_id,event_type,from_status,to_status,member_id,worker_name,metadata)
+      VALUES(${this.project.projectId},${id},'WORK_STARTED',${target.status},'IN_PROGRESS',${this.project.memberId},${this.project.memberName},${tx.json({ resumed: !["PENDING", "READY"].includes(target.status) })})`;
+    return mapJob(rows[0]!);
   }
 
   async claim(id: string): Promise<ManualJob> {
-    const job = await inTransaction(this.sql, "work_item.claim", async (tx) => {
-      const targets = await tx<
-        { status: WorkState; assigned_member_id: string | null }[]
-      >`
-        SELECT status,assigned_member_id FROM jobsmith_work_items
-        WHERE id=${id} AND project_id=${this.project.projectId} FOR UPDATE`;
-      const target = targets[0];
-      const available =
-        target &&
-        ((["PENDING", "READY"].includes(target.status) &&
-          target.assigned_member_id === null) ||
-          (["IN_PROGRESS", "PAUSED", "BLOCKED"].includes(target.status) &&
-            target.assigned_member_id === this.project.memberId));
-      if (!available || !target) throw new Error("Job is no longer available");
-      const rows = await tx<ManualJobRow[]>`
-        UPDATE jobsmith_work_items SET status='IN_PROGRESS',assigned_member_id=${this.project.memberId},
-          assigned_worker_name=${this.project.memberName},blocked_reason=NULL,
-          started_at=COALESCE(started_at,clock_timestamp()),version=version+1,updated_at=clock_timestamp()
-        WHERE id=${id} AND project_id=${this.project.projectId}
-        RETURNING ${tx.unsafe(fields)}`;
-      await tx`INSERT INTO jobsmith_work_events(project_id,work_item_id,event_type,from_status,to_status,member_id,worker_name,metadata)
-        VALUES(${this.project.projectId},${id},'WORK_STARTED',${target.status},'IN_PROGRESS',${this.project.memberId},${this.project.memberName},${tx.json({ resumed: !["PENDING", "READY"].includes(target.status) })})`;
-      return mapJob(rows[0]!);
-    });
+    const job = await inTransaction(this.sql, "work_item.claim", (tx) =>
+      this.claimInTx(tx, id),
+    );
     this.log.info(
       {
         event: "work_item.claimed",
@@ -161,6 +173,86 @@ export class ManualJobService {
       "Work item claimed",
     );
     await this.notifier.publish("work.claimed", id);
+    return job;
+  }
+
+  async claimMany(ids: string[]): Promise<{
+    claimed: ManualJob[];
+    failures: ClaimFailure[];
+  }> {
+    const claimed: ManualJob[] = [];
+    const failures: ClaimFailure[] = [];
+    await inTransaction(this.sql, "work_item.claim_many", async (tx) => {
+      for (const id of ids) {
+        // Caught here so earlier claims in the batch stay committed.
+        try {
+          claimed.push(await this.claimInTx(tx, id));
+        } catch (error) {
+          failures.push({
+            id,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    });
+    if (claimed.length)
+      this.log.info(
+        {
+          event: "work_item.claimed_many",
+          projectId: this.project.projectId,
+          memberId: this.project.memberId,
+          count: claimed.length,
+          failed: failures.length,
+        },
+        "Work items claimed",
+      );
+    await Promise.all(
+      claimed.map((job) => this.notifier.publish("work.claimed", job.id)),
+    );
+    return { claimed, failures };
+  }
+
+  async cancel(id: string): Promise<ManualJob> {
+    const job = await inTransaction(
+      this.sql,
+      "work_item.cancel",
+      async (tx) => {
+        const targets = await tx<
+          { status: WorkState; assigned_member_id: string | null }[]
+        >`
+        SELECT status,assigned_member_id FROM jobsmith_work_items
+        WHERE id=${id} AND project_id=${this.project.projectId} FOR UPDATE`;
+        const target = targets[0];
+        const cancellable =
+          target &&
+          ((target.status === "PENDING" &&
+            target.assigned_member_id === null) ||
+            (["IN_PROGRESS", "PAUSED", "BLOCKED"].includes(target.status) &&
+              target.assigned_member_id === this.project.memberId));
+        if (!cancellable || !target)
+          throw new Error(
+            "Only unclaimed pending jobs or your own claimed jobs can be cancelled",
+          );
+        const rows = await tx<ManualJobRow[]>`
+        UPDATE jobsmith_work_items SET status='CANCELLED',blocked_reason=NULL,
+          completed_at=clock_timestamp(),version=version+1,updated_at=clock_timestamp()
+        WHERE id=${id} AND project_id=${this.project.projectId}
+        RETURNING ${tx.unsafe(fields)}`;
+        await tx`INSERT INTO jobsmith_work_events(project_id,work_item_id,event_type,from_status,to_status,member_id,worker_name,metadata)
+        VALUES(${this.project.projectId},${id},'WORK_STATE_CHANGED',${target.status},'CANCELLED',${this.project.memberId},${this.project.memberName},${tx.json({ cancelled: true })})`;
+        return mapJob(rows[0]!);
+      },
+    );
+    this.log.info(
+      {
+        event: "work_item.cancelled",
+        projectId: this.project.projectId,
+        jobId: id,
+        memberId: this.project.memberId,
+      },
+      "Work item cancelled",
+    );
+    await this.notifier.publish("work.state_changed", id);
     return job;
   }
 

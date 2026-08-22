@@ -17,6 +17,7 @@ const job: ManualJob = {
   priority: 5,
   state: "PENDING",
   progressPercent: 0,
+  assignedMemberId: null,
   assignedWorkerName: null,
   tags: [],
   dueAt: null,
@@ -24,6 +25,13 @@ const job: ManualJob = {
   createdAt: new Date("2026-08-12T00:00:00.000Z"),
   updatedAt: new Date("2026-08-12T00:00:00.000Z"),
 };
+
+const fetch =
+  (jobs: ManualJob[], truncated = false) =>
+  async () => ({
+    jobs,
+    truncated,
+  });
 
 async function root(): Promise<string> {
   const value = await mkdtemp(join(tmpdir(), "jobsmith-cache-"));
@@ -45,7 +53,7 @@ describe("job cache", () => {
       directory,
       async () => {
         calls++;
-        return [job];
+        return { jobs: [job], truncated: false };
       },
       () => 1_000,
     );
@@ -53,7 +61,7 @@ describe("job cache", () => {
       directory,
       async () => {
         calls++;
-        return [];
+        return { jobs: [], truncated: false };
       },
       () => 1_000 + CACHE_TTL_MS,
     );
@@ -62,47 +70,66 @@ describe("job cache", () => {
     expect(calls).toBe(1);
   });
 
-  test("refreshes expired, corrupt, wrong-shaped, and missing caches", async () => {
+  test("refreshes expired, corrupt, stale-versioned, and missing caches", async () => {
     const directory = await root();
     let calls = 0;
-    const fetch = async () => {
+    const fetcher = async () => {
       calls++;
-      return [job];
+      return { jobs: [job], truncated: false };
     };
-    await readJobs(directory, fetch, () => 1_000);
-    await readJobs(directory, fetch, () => 1_000 + CACHE_TTL_MS + 1);
+    await readJobs(directory, fetcher, () => 1_000);
+    await readJobs(directory, fetcher, () => 1_000 + CACHE_TTL_MS + 1);
     const file = join(directory, ".jobsmith", "cache", "jobs.json");
     await writeFile(file, "not json");
-    await readJobs(directory, fetch);
+    await readJobs(directory, fetcher);
+    await writeFile(file, JSON.stringify({ schemaVersion: 1, jobs: [] }));
+    await readJobs(directory, fetcher);
     await writeFile(file, JSON.stringify({ jobs: [] }));
-    await readJobs(directory, fetch);
-    expect(calls).toBe(4);
+    await readJobs(directory, fetcher);
+    expect(calls).toBe(5);
+  });
+
+  test("keeps the truncation flag from the database fetch", async () => {
+    const directory = await root();
+    const result = await readJobs(
+      directory,
+      async () => ({ jobs: [job], truncated: true }),
+      () => 1_000,
+    );
+    expect(result.truncated).toBe(true);
+    expect(result.jobs).toEqual([job]);
   });
 
   test("patches add, update, and remove without fetching", async () => {
     const directory = await root();
     let calls = 0;
-    const fetch = async () => {
+    const fetcher = async () => {
       calls++;
-      return [job];
+      return { jobs: [job], truncated: false };
     };
-    await readJobs(directory, fetch);
+    await readJobs(directory, fetcher);
     await patchSnapshot(
       directory,
-      (jobs) => [{ ...job, id: "second" }, ...jobs],
-      fetch,
+      (jobs) => [
+        { ...job, id: "22222222-2222-4222-8222-222222222222" },
+        ...jobs,
+      ],
+      fetcher,
     );
     await patchSnapshot(
       directory,
       (jobs) => jobs.map((item) => ({ ...item, progressPercent: 50 })),
-      fetch,
+      fetcher,
     );
     await patchSnapshot(
       directory,
-      (jobs) => jobs.filter((item) => item.id !== "second"),
-      fetch,
+      (jobs) =>
+        jobs.filter(
+          (item) => item.id !== "22222222-2222-4222-8222-222222222222",
+        ),
+      fetcher,
     );
-    const result = await readJobs(directory, fetch);
+    const result = await readJobs(directory, fetcher);
     expect(result.jobs).toHaveLength(1);
     expect(result.jobs[0]?.progressPercent).toBe(50);
     expect(calls).toBe(1);
@@ -116,31 +143,34 @@ describe("job cache", () => {
       (jobs) => jobs,
       async () => {
         calls++;
-        return [job];
+        return { jobs: [job], truncated: false };
       },
     );
     expect(calls).toBe(1);
-    expect((await readJobs(directory, async () => [])).jobs).toEqual([job]);
+    expect(
+      (await readJobs(directory, async () => ({ jobs: [], truncated: false })))
+        .jobs,
+    ).toEqual([job]);
   });
 
   test("leaves the prior snapshot intact when mutation fails", async () => {
     const directory = await root();
-    await readJobs(directory, async () => [job]);
+    await readJobs(directory, fetch([job]));
     expect(
       patchSnapshot(
         directory,
         () => {
           throw new Error("mutation failed");
         },
-        async () => [],
+        fetch([]),
       ),
     ).rejects.toThrow("mutation failed");
-    expect((await readJobs(directory, async () => [])).jobs).toEqual([job]);
+    expect((await readJobs(directory, fetch([]))).jobs).toEqual([job]);
   });
 
   test("uses secure permissions and leaves no temporary file", async () => {
     const directory = await root();
-    await readJobs(directory, async () => [job]);
+    await readJobs(directory, fetch([job]));
     const cache = join(directory, ".jobsmith", "cache");
     expect((await stat(cache)).mode & 0o777).toBe(0o700);
     expect((await stat(join(cache, "jobs.json"))).mode & 0o777).toBe(0o600);
@@ -151,11 +181,7 @@ describe("job cache", () => {
 
   test("falls back to stale cache while offline", async () => {
     const directory = await root();
-    await readJobs(
-      directory,
-      async () => [job],
-      () => 1_000,
-    );
+    await readJobs(directory, fetch([job]), () => 1_000);
     const result = await readJobs(
       directory,
       async () => {

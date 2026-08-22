@@ -27,6 +27,7 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
   const projectId = crypto.randomUUID();
   const hostId = crypto.randomUUID();
   const workerId = crypto.randomUUID();
+  const workerTwoId = crypto.randomUUID();
   let sql: Database;
 
   const project = (
@@ -57,7 +58,8 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
     await sql`INSERT INTO jobsmith_projects(id,name) VALUES(${projectId},'Integration project')`;
     await sql`INSERT INTO jobsmith_members(id,project_id,name,role,machine_id) VALUES
       (${hostId},${projectId},'Host','HOST',${crypto.randomUUID()}),
-      (${workerId},${projectId},'Worker','MEMBER',${crypto.randomUUID()})`;
+      (${workerId},${projectId},'Worker','MEMBER',${crypto.randomUUID()}),
+      (${workerTwoId},${projectId},'Worker Two','MEMBER',${crypto.randomUUID()})`;
   }, 30_000);
 
   afterAll(async () => {
@@ -99,17 +101,20 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
       tags: ["release"],
       dueAt: null,
     });
-    expect((await host.listPending()).map((job) => job.id)).toContain(
+    expect((await host.listPending()).jobs.map((job) => job.id)).toContain(
       created.id,
     );
     expect((await worker.claim(created.id)).assignedWorkerName).toBe("Worker");
     await worker.addNote(created.id, "Draft completed");
     await worker.setProgress(created.id, 60);
     await worker.saveSession(created.id);
-    expect(
-      (await worker.listForWorker()).find((job) => job.id === created.id)
-        ?.progressPercent,
-    ).toBe(60);
+    const owned = (await worker.listPending()).jobs;
+    expect(owned.find((job) => job.id === created.id)?.progressPercent).toBe(
+      60,
+    );
+    expect(owned.find((job) => job.id === created.id)?.assignedMemberId).toBe(
+      workerId,
+    );
     await worker.transition(created.id, "COMPLETED");
 
     expect(
@@ -127,9 +132,6 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
 
   test("a cached job still has only one claim winner", async () => {
     const log = createLogger("claim-cache-integration");
-    const workerTwoId = crypto.randomUUID();
-    await sql`INSERT INTO jobsmith_members(id,project_id,name,role,machine_id)
-      VALUES(${workerTwoId},${projectId},'Worker Two','MEMBER',${crypto.randomUUID()})`;
     const host = new ManualJobService(
       sql,
       project(hostId, "Host", "HOST"),
@@ -179,6 +181,102 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
         roots.map((root) => rm(root, { recursive: true, force: true })),
       );
     }
+  });
+
+  test("claiming a batch succeeds or fails per job inside one transaction", async () => {
+    const log = createLogger("batch-claim-integration");
+    const host = new ManualJobService(
+      sql,
+      project(hostId, "Host", "HOST"),
+      notifier,
+      log,
+    );
+    const first = new ManualJobService(
+      sql,
+      project(workerId, "Worker", "MEMBER"),
+      notifier,
+      log,
+    );
+    const second = new ManualJobService(
+      sql,
+      project(workerTwoId, "Worker Two", "MEMBER"),
+      notifier,
+      log,
+    );
+    const shared = await host.create({
+      title: "Contended batch job",
+      description: "Taken by the first worker before the batch",
+      priority: 5,
+      tags: [],
+      dueAt: null,
+    });
+    const free = await host.create({
+      title: "Free batch job",
+      description: "Available for the batch",
+      priority: 5,
+      tags: [],
+      dueAt: null,
+    });
+    await second.claim(shared.id);
+    const { claimed, failures } = await first.claimMany([shared.id, free.id]);
+    expect(claimed.map((job) => job.id)).toEqual([free.id]);
+    expect(failures).toEqual([
+      { id: shared.id, reason: "Job is no longer available" },
+    ]);
+  });
+
+  test("cancellation covers unclaimed pending work and own claimed work only", async () => {
+    const log = createLogger("cancel-integration");
+    const host = new ManualJobService(
+      sql,
+      project(hostId, "Host", "HOST"),
+      notifier,
+      log,
+    );
+    const worker = new ManualJobService(
+      sql,
+      project(workerId, "Worker", "MEMBER"),
+      notifier,
+      log,
+    );
+    const unclaimed = await host.create({
+      title: "Cancel me while pending",
+      description: "Anyone may cancel an unclaimed job",
+      priority: 3,
+      tags: [],
+      dueAt: null,
+    });
+    const cancelled = await worker.cancel(unclaimed.id);
+    expect(cancelled.state).toBe("CANCELLED");
+
+    const claimed = await host.create({
+      title: "Cancel me after claiming",
+      description: "Only the owner may cancel claimed work",
+      priority: 3,
+      tags: [],
+      dueAt: null,
+    });
+    await worker.claim(claimed.id);
+    await worker.transition(claimed.id, "PAUSED");
+    expect(
+      new ManualJobService(
+        sql,
+        project(workerTwoId, "Worker Two", "MEMBER"),
+        notifier,
+        log,
+      ).cancel(claimed.id),
+    ).rejects.toThrow("can be cancelled");
+    await worker.cancel(claimed.id);
+    const [row] = await sql`SELECT status FROM jobsmith_work_items
+      WHERE id=${claimed.id}`;
+    expect(row?.status).toBe("CANCELLED");
+    const events = await sql`SELECT event_type,to_status,metadata
+      FROM jobsmith_work_events WHERE work_item_id=${claimed.id}
+      ORDER BY id`;
+    expect(events.at(-1)).toMatchObject({
+      to_status: "CANCELLED",
+      metadata: { cancelled: true },
+    });
   });
 
   test("connection strings can be redeemed only once", async () => {

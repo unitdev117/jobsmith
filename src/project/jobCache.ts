@@ -9,7 +9,7 @@ import {
 import { join } from "node:path";
 import { z } from "zod";
 import { errorFields, logger } from "../observability/logger.ts";
-import type { ManualJob } from "../services/manualJobService.ts";
+import type { ManualJob, PendingFetch } from "../services/manualJobService.ts";
 
 export const CACHE_TTL_MS = 90_000;
 
@@ -20,6 +20,7 @@ const jobSchema = z.object({
   priority: z.number(),
   state: z.enum(["PENDING", "READY", "IN_PROGRESS", "PAUSED", "BLOCKED"]),
   progressPercent: z.number(),
+  assignedMemberId: z.string().uuid().nullable(),
   assignedWorkerName: z.string().nullable(),
   tags: z.array(z.string()),
   dueAt: z.coerce.date().nullable(),
@@ -29,13 +30,15 @@ const jobSchema = z.object({
 });
 
 const snapshotSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   fetchedAt: z.coerce.date(),
+  truncated: z.boolean(),
   jobs: z.array(jobSchema),
 });
 
 interface Snapshot {
   fetchedAt: Date;
+  truncated: boolean;
   jobs: ManualJob[];
 }
 
@@ -88,7 +91,7 @@ async function store(root: string, snapshot: Snapshot): Promise<void> {
   const target = paths(root);
   await mkdir(target.directory, { recursive: true, mode: 0o700 });
   await chmod(target.directory, 0o700);
-  const body = JSON.stringify({ schemaVersion: 1, ...snapshot }, null, 2);
+  const body = JSON.stringify({ schemaVersion: 2, ...snapshot }, null, 2);
   const temporary = join(
     target.directory,
     `jobs.json.${crypto.randomUUID()}.tmp`,
@@ -113,18 +116,23 @@ async function store(root: string, snapshot: Snapshot): Promise<void> {
 
 export async function refreshJobs(
   root: string,
-  fetchFromDb: () => Promise<ManualJob[]>,
+  fetchFromDb: () => Promise<PendingFetch>,
   now: () => number = Date.now,
 ): Promise<ReadResult> {
-  const jobs = await fetchFromDb();
+  const fetched = await fetchFromDb();
   const fetchedAt = new Date(now());
-  await store(root, { jobs, fetchedAt });
-  return { jobs, fetchedAt, fromCache: false, offline: false };
+  const snapshot: Snapshot = {
+    jobs: fetched.jobs,
+    truncated: fetched.truncated,
+    fetchedAt,
+  };
+  await store(root, snapshot);
+  return { ...snapshot, fromCache: false, offline: false };
 }
 
 export async function readJobs(
   root: string,
-  fetchFromDb: () => Promise<ManualJob[]>,
+  fetchFromDb: () => Promise<PendingFetch>,
   now: () => number = Date.now,
 ): Promise<ReadResult> {
   const cached = await load(root);
@@ -132,9 +140,14 @@ export async function readJobs(
     logger.debug({ event: "job_cache.hit" }, "Jobs served from cache");
     return { ...cached, fromCache: true, offline: false };
   }
-  let jobs: ManualJob[];
+  let snapshot: Snapshot;
   try {
-    jobs = await fetchFromDb();
+    const fetched = await fetchFromDb();
+    snapshot = {
+      jobs: fetched.jobs,
+      truncated: fetched.truncated,
+      fetchedAt: new Date(now()),
+    };
   } catch (error) {
     if (!cached) throw error;
     logger.warn(
@@ -147,22 +160,21 @@ export async function readJobs(
     );
     return { ...cached, fromCache: true, offline: true };
   }
-  const fetchedAt = new Date(now());
   try {
-    await store(root, { jobs, fetchedAt });
+    await store(root, snapshot);
   } catch (error) {
     logger.warn(
       { event: "job_cache.store_failed", ...errorFields(error) },
       "Job cache write failed; serving fresh data",
     );
   }
-  return { jobs, fetchedAt, fromCache: false, offline: false };
+  return { ...snapshot, fromCache: false, offline: false };
 }
 
 export async function patchSnapshot(
   root: string,
   mutate: (jobs: ManualJob[]) => ManualJob[],
-  fetchFromDb: () => Promise<ManualJob[]>,
+  fetchFromDb: () => Promise<PendingFetch>,
   now: () => number = Date.now,
 ): Promise<void> {
   const cached = await load(root);
@@ -171,6 +183,10 @@ export async function patchSnapshot(
     return;
   }
   const jobs = mutate(cached.jobs);
-  await store(root, { jobs, fetchedAt: cached.fetchedAt });
+  await store(root, {
+    jobs,
+    truncated: cached.truncated,
+    fetchedAt: cached.fetchedAt,
+  });
   logger.debug({ event: "job_cache.patched" }, "Job cache patched");
 }

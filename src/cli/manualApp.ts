@@ -6,6 +6,7 @@ import type {
   ManualJob,
   ManualJobService,
 } from "../services/manualJobService.ts";
+import { ACTIVE_STATES } from "../services/manualJobService.ts";
 import {
   ask,
   confirm,
@@ -135,11 +136,12 @@ export async function runPending(
       syncedAt: result.fetchedAt,
       fromCache: result.fromCache,
       offline: result.offline,
+      truncated: result.truncated,
     })}\n`,
   );
 }
 
-const activeStates = new Set(["IN_PROGRESS", "PAUSED", "BLOCKED"]);
+const activeStates = new Set<string>(ACTIVE_STATES);
 
 export function jobsForWorker(
   jobs: ManualJob[],
@@ -148,9 +150,9 @@ export function jobsForWorker(
   return jobs.filter(
     (job) =>
       ((job.state === "PENDING" || job.state === "READY") &&
-        job.assignedWorkerName === null) ||
+        job.assignedMemberId === null) ||
       (activeStates.has(job.state) &&
-        job.assignedWorkerName === project.memberName),
+        job.assignedMemberId === project.memberId),
   );
 }
 
@@ -194,6 +196,7 @@ export async function runJobUpdateMenu(
         "Mark completed",
         "Mark failed",
         "Release back to pending",
+        "Cancel job",
         "Save and exit",
       ] as const,
       (choice) => choice,
@@ -261,6 +264,26 @@ export async function runJobUpdateMenu(
         .min(1)
         .max(4000)
         .parse(await ask("Failure reason", { required: true }));
+    } else if (action === "Cancel job") {
+      if (!(await confirm("Cancel this job permanently?"))) continue;
+      await service.cancel(job.id);
+      await updateCache(() =>
+        patchSnapshot(
+          root,
+          (jobs) => jobs.filter((candidate) => candidate.id !== job.id),
+          () => service.listPending(),
+        ),
+      );
+      logger.info(
+        {
+          event: "cache.job_transition_patched",
+          jobId: job.id,
+          outcome: "CANCELLED",
+        },
+        "Job transition cached",
+      );
+      process.stdout.write("Job cancelled.\n");
+      return;
     } else {
       if (!(await confirm("Release this job for another worker?"))) continue;
       outcome = "PENDING";
@@ -319,37 +342,39 @@ export async function runWorker(
     "Choose one or more jobs",
     available,
     (job) =>
-      `${job.assignedWorkerName === project.memberName ? job.state : priorityLabel(job.priority)}  ${job.title}  ${job.progressPercent}%`,
+      `${job.assignedMemberId === project.memberId ? job.state : priorityLabel(job.priority)}  ${job.title}  ${job.progressPercent}%`,
   );
   if (!selected.length) {
     process.stdout.write("No job selected.\n");
     return;
   }
-  const claimed: ManualJob[] = [];
-  for (const candidate of selected) {
-    let job: ManualJob;
-    try {
-      job = await service.claim(candidate.id);
-    } catch (error) {
-      logger.warn(
-        { event: "worker.claim_failed", jobId: candidate.id },
-        "Job claim failed",
-      );
-      process.stderr.write(
-        `${candidate.title}: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-      continue;
-    }
-    claimed.push(job);
-    await updateCache(() =>
-      patchSnapshot(
-        root,
-        (jobs) => [job, ...jobs.filter((item) => item.id !== job.id)],
-        () => service.listPending(),
-      ),
+  const titles = new Map(selected.map((job) => [job.id, job.title]));
+  const { claimed, failures } = await service.claimMany(
+    selected.map((job) => job.id),
+  );
+  for (const failure of failures) {
+    logger.warn(
+      { event: "worker.claim_failed", jobId: failure.id },
+      "Job claim failed",
     );
-    process.stdout.write(`Claimed ${job.id}.\n${jobSummary(job)}\n\n`);
+    process.stderr.write(
+      `${titles.get(failure.id) ?? failure.id}: ${failure.reason}\n`,
+    );
   }
+  if (claimed.length)
+    await updateCache(() => {
+      const claimedIds = new Set(claimed.map((job) => job.id));
+      return patchSnapshot(
+        root,
+        (jobs) => [
+          ...claimed.slice().reverse(),
+          ...jobs.filter((job) => !claimedIds.has(job.id)),
+        ],
+        () => service.listPending(),
+      );
+    });
+  for (const job of claimed)
+    process.stdout.write(`Claimed ${job.id}.\n${jobSummary(job)}\n\n`);
   if (!claimed.length) return;
   process.stdout.write(
     claimed.length === 1
@@ -367,14 +392,25 @@ export async function runUpdate(
   const result = await readJobs(root, () => service.listPending());
   const owned = result.jobs.filter(
     (job) =>
-      activeStates.has(job.state) &&
-      job.assignedWorkerName === project.memberName,
+      activeStates.has(job.state) && job.assignedMemberId === project.memberId,
   );
   const matches = resolveUpdateJobs(owned, query);
-  if (!matches.length)
+  if (!matches.length) {
+    if (query) {
+      const cancelled = await offerCancelUnclaimed(
+        service,
+        root,
+        result.jobs.filter(
+          (job) => job.state === "PENDING" && job.assignedMemberId === null,
+        ),
+        query,
+      );
+      if (cancelled) return;
+    }
     throw new Error(
       "No claimed job found. Run `jobsmith worker` to claim work first",
     );
+  }
   const job =
     matches.length === 1
       ? matches[0]!
@@ -403,4 +439,46 @@ export async function runUpdate(
     );
   }
   await runJobUpdateMenu(service, job, root);
+}
+
+async function offerCancelUnclaimed(
+  service: ManualJobService,
+  root: string,
+  pending: ManualJob[],
+  query: string,
+): Promise<boolean> {
+  const candidates = resolveUpdateJobs(pending, query);
+  if (!candidates.length) return false;
+  const target =
+    candidates.length === 1
+      ? candidates[0]!
+      : await selectMenu(
+          "No claimed job matches. Cancel an unclaimed job instead?",
+          candidates,
+          (candidate) =>
+            `${priorityLabel(candidate.priority)}  ${candidate.title}`,
+        );
+  if (!target) return false;
+  if (!(await confirm(`Cancel unclaimed job "${target.title}"?`))) {
+    process.stdout.write("Cancellation aborted.\n");
+    return true;
+  }
+  await service.cancel(target.id);
+  await updateCache(() =>
+    patchSnapshot(
+      root,
+      (jobs) => jobs.filter((candidate) => candidate.id !== target.id),
+      () => service.listPending(),
+    ),
+  );
+  logger.info(
+    {
+      event: "cache.job_transition_patched",
+      jobId: target.id,
+      outcome: "CANCELLED",
+    },
+    "Job transition cached",
+  );
+  process.stdout.write(`Cancelled ${target.id}.\n`);
+  return true;
 }

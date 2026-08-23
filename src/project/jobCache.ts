@@ -25,6 +25,7 @@ const jobSchema = z.object({
   tags: z.array(z.string()),
   dueAt: z.coerce.date().nullable(),
   blockedReason: z.string().nullable(),
+  claimedUntil: z.coerce.date().nullable(),
   createdAt: z.coerce.date(),
   updatedAt: z.coerce.date(),
 });

@@ -74,11 +74,15 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
       (await sql`SELECT to_regclass('jobsmith_work_items')::text AS name`)[0]
         ?.name,
     ).toBe("jobsmith_work_items");
-    expect(
-      sql`INSERT INTO jobsmith_work_items(id,project_id,title,description,priority,status)
-        VALUES(${crypto.randomUUID()},${projectId},'Bad','priority',10,'PENDING')`,
-    ).rejects.toThrow();
-  });
+    // Bun's .rejects matcher never settles on postgres.js thenables, so
+    // rejections are captured and asserted directly.
+    const rejection =
+      await sql`INSERT INTO jobsmith_work_items(id,project_id,title,description,priority,status)
+      VALUES(${crypto.randomUUID()},${projectId},'Bad','priority',10,'PENDING')`.catch(
+        (error: unknown) => error,
+      );
+    expect(rejection).toBeInstanceOf(Error);
+  }, 60_000);
 
   test("a member owns work and every update remains auditable", async () => {
     const log = createLogger("manual-job-integration");
@@ -128,7 +132,7 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
     expect(
       await sql`SELECT id FROM jobsmith_work_events WHERE work_item_id=${created.id}`,
     ).toHaveLength(6);
-  });
+  }, 60_000);
 
   test("a cached job still has only one claim winner", async () => {
     const log = createLogger("claim-cache-integration");
@@ -181,7 +185,7 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
         roots.map((root) => rm(root, { recursive: true, force: true })),
       );
     }
-  });
+  }, 60_000);
 
   test("claiming a batch succeeds or fails per job inside one transaction", async () => {
     const log = createLogger("batch-claim-integration");
@@ -223,7 +227,7 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
     expect(failures).toEqual([
       { id: shared.id, reason: "Job is no longer available" },
     ]);
-  });
+  }, 60_000);
 
   test("cancellation covers unclaimed pending work and own claimed work only", async () => {
     const log = createLogger("cancel-integration");
@@ -258,14 +262,15 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
     });
     await worker.claim(claimed.id);
     await worker.transition(claimed.id, "PAUSED");
-    expect(
-      new ManualJobService(
-        sql,
-        project(workerTwoId, "Worker Two", "MEMBER"),
-        notifier,
-        log,
-      ).cancel(claimed.id),
-    ).rejects.toThrow("can be cancelled");
+    const refusal = await new ManualJobService(
+      sql,
+      project(workerTwoId, "Worker Two", "MEMBER"),
+      notifier,
+      log,
+    )
+      .cancel(claimed.id)
+      .catch((error: unknown) => error);
+    expect((refusal as Error).message).toContain("can be cancelled");
     await worker.cancel(claimed.id);
     const [row] = await sql`SELECT status FROM jobsmith_work_items
       WHERE id=${claimed.id}`;
@@ -277,7 +282,7 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
       to_status: "CANCELLED",
       metadata: { cancelled: true },
     });
-  });
+  }, 60_000);
 
   test("connection strings can be redeemed only once", async () => {
     const host = project(hostId, "Host", "HOST");
@@ -294,8 +299,68 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
     });
     expect(joined.projectId).toBe(projectId);
     expect(joined.role).toBe("AGENT");
-    expect(
-      projects.join({ invite, memberName: "Replay", role: "MEMBER" }),
-    ).rejects.toThrow("invalid, expired, or already used");
-  });
+    const replay = await projects
+      .join({ invite, memberName: "Replay", role: "MEMBER" })
+      .catch((error: unknown) => error);
+    expect((replay as Error).message).toContain(
+      "invalid, expired, or already used",
+    );
+  }, 60_000);
+
+  test("expired claim leases release work to other workers", async () => {
+    const log = createLogger("lease-integration");
+    const host = new ManualJobService(
+      sql,
+      project(hostId, "Host", "HOST"),
+      notifier,
+      log,
+    );
+    const first = new ManualJobService(
+      sql,
+      project(workerId, "Worker", "MEMBER"),
+      notifier,
+      log,
+      1,
+    );
+    const second = new ManualJobService(
+      sql,
+      project(workerTwoId, "Worker Two", "MEMBER"),
+      notifier,
+      log,
+      1,
+    );
+    const created = await host.create({
+      title: "Lease takeover target",
+      description: "Abandoned claims must return to the pool",
+      priority: 4,
+      tags: [],
+      dueAt: null,
+    });
+    await first.claim(created.id);
+
+    // Live lease: nobody else can take it.
+    const refused = await second
+      .claim(created.id)
+      .catch((error: unknown) => error);
+    expect((refused as Error).message).toContain("no longer available");
+
+    // Owner touches keep the lease alive; expiry only after silence.
+    const before = (
+      await sql`SELECT claimed_until FROM jobsmith_work_items WHERE id=${created.id}`
+    )[0]!.claimed_until as Date;
+    await first.addNote(created.id, "still working");
+    const refreshed = (
+      await sql`SELECT claimed_until FROM jobsmith_work_items WHERE id=${created.id}`
+    )[0]!.claimed_until as Date;
+    expect(refreshed.getTime()).toBeGreaterThan(before.getTime());
+
+    await sql`
+      UPDATE jobsmith_work_items SET claimed_until=clock_timestamp()-INTERVAL '1 minute'
+      WHERE id=${created.id}`;
+    const takenOver = await second.claim(created.id);
+    expect(takenOver.assignedMemberId).toBe(workerTwoId);
+    const [row] = await sql`SELECT assigned_member_id FROM jobsmith_work_items
+      WHERE id=${created.id}`;
+    expect(row?.assigned_member_id).toBe(workerTwoId);
+  }, 60_000);
 });

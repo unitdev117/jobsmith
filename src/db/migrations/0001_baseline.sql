@@ -1,4 +1,7 @@
--- Baseline schema. Numbering starts at 0002; never rename applied migrations.
+-- Baseline schema, consolidated before the first release. There is no
+-- upgrade history to preserve: development databases are recreated from
+-- this file. Once real deployments exist, new migrations must never be
+-- edited and schema_migrations records applied files by name.
 CREATE TABLE IF NOT EXISTS jobsmith_projects (
   id uuid PRIMARY KEY,
   name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
@@ -46,6 +49,9 @@ CREATE TABLE IF NOT EXISTS jobsmith_work_items (
   due_at timestamptz,
   failure_reason text CHECK (char_length(failure_reason) <= 4000),
   blocked_reason text CHECK (char_length(blocked_reason) <= 4000),
+  -- Claim leases: refreshed whenever the owner touches the job; expired
+  -- leases may be taken over by another worker.
+  claimed_until timestamptz,
   version bigint NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -57,6 +63,10 @@ CREATE TABLE IF NOT EXISTS jobsmith_work_items (
 CREATE INDEX IF NOT EXISTS jobsmith_work_available_idx
   ON jobsmith_work_items (project_id, priority DESC, created_at)
   WHERE status IN ('PENDING','READY');
+
+CREATE INDEX IF NOT EXISTS jobsmith_work_active_idx
+  ON jobsmith_work_items (project_id, priority DESC, created_at)
+  WHERE status IN ('PENDING','READY','IN_PROGRESS','PAUSED','BLOCKED');
 
 CREATE INDEX IF NOT EXISTS jobsmith_work_member_idx
   ON jobsmith_work_items (project_id, assigned_member_id, updated_at DESC)

@@ -102,7 +102,30 @@ export class ProjectNotifier {
     }
   }
 
+  // Passthroughs so the serve process rate limiter reuses this connection
+  // instead of opening its own.
+  async incr(key: string): Promise<number> {
+    await this.ensureConnected();
+    return this.client.incr(key);
+  }
+
+  async expire(key: string, seconds: number): Promise<void> {
+    await this.ensureConnected();
+    await this.client.expire(key, seconds);
+  }
+
+  // ioredis 6 finishes its teardown asynchronously; waiting for the real
+  // "end" keeps an immediate republish on the clean reconnect path instead
+  // of racing the dying socket.
   async close(): Promise<void> {
-    if (this.client.status !== "end") this.client.disconnect();
+    if (this.client.status === "end") return;
+    const ended = new Promise<void>((resolve) => {
+      this.client.once("end", () => resolve());
+    });
+    const timeout = new Promise<void>((resolve) => {
+      setTimeout(resolve, 250);
+    });
+    this.client.disconnect();
+    await Promise.race([ended, timeout]);
   }
 }

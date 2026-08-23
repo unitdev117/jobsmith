@@ -7,6 +7,7 @@ import {
 } from "./cli/manualApp.ts";
 import { runDaemonCommand, runStatus } from "./cli/daemonApp.ts";
 import { runConnect, runInit, runRemove } from "./cli/projectApp.ts";
+import { runServerCommand } from "./cli/serverApp.ts";
 import { loadDatabaseConfig } from "./config/index.ts";
 import { ProjectNotifier } from "./coordination/valkey.ts";
 import { closeDatabase, createDatabase } from "./db/pool.ts";
@@ -23,9 +24,10 @@ Usage:
   jobsmith manager   Enlist a new job through an interactive wizard
   jobsmith worker    Select and claim one or more jobs
   jobsmith update    Report progress or finish claimed work
-  jobsmith pending   Show all unfinished jobs and their states
+  jobsmith pending   Show unfinished jobs (paged)
   jobsmith daemon    Start, stop, or check the background online worker
   jobsmith status    Show which workers are online
+  jobsmith server    Start, stop, or check the local API and web dashboard
   jobsmith help      Show this help
 `;
 
@@ -46,6 +48,7 @@ async function main(): Promise<void> {
       "pending",
       "daemon",
       "status",
+      "server",
     ].includes(command)
   ) {
     process.stderr.write(`Unknown command: ${command}\n\n${help}`);
@@ -74,6 +77,10 @@ async function main(): Promise<void> {
   }
   if (command === "status") {
     await runStatus(project, log);
+    return;
+  }
+  if (command === "server") {
+    await runServerCommand(root, process.argv[3], process.argv.slice(4), log);
     return;
   }
 
@@ -107,7 +114,7 @@ async function main(): Promise<void> {
     else if (command === "worker") await runWorker(jobs, project, root);
     else if (command === "update")
       await runUpdate(jobs, project, root, process.argv[3]);
-    else await runPending(jobs, root);
+    else await runPending(jobs, process.argv.slice(3));
     log.info(
       { event: "cli.completed", command, projectId: project.projectId },
       "Jobsmith command completed",

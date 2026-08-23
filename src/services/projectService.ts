@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Logger } from "pino";
 import type { Database } from "../db/pool.ts";
 import { inTransaction } from "../db/transaction.ts";
+import { ServiceError } from "./errors.ts";
 import type { LocalProject } from "../project/localConfig.ts";
 
 const inviteSchema = z.object({
@@ -21,6 +22,7 @@ const inviteSchema = z.object({
 
 type InvitePayload = z.infer<typeof inviteSchema>;
 export type JoinRole = "MEMBER" | "AGENT";
+export type MemberRole = "HOST" | "MEMBER" | "AGENT";
 
 const hashToken = (token: string): string =>
   createHash("sha256").update(token).digest("hex");
@@ -79,7 +81,10 @@ export class ProjectService {
     ttlMinutes: number,
   ): Promise<{ value: string; expiresAt: Date }> {
     if (project.role !== "HOST")
-      throw new Error("Only the project host can create connection strings");
+      throw new ServiceError(
+        403,
+        "Only the project host can create connection strings",
+      );
     const inviteId = crypto.randomUUID();
     const token = randomBytes(32).toString("base64url");
     const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
@@ -156,5 +161,26 @@ export class ProjectService {
       databaseUrl: input.invite.databaseUrl,
       valkeyUrl: input.invite.valkeyUrl,
     };
+  }
+
+  async listMembers(projectId: string): Promise<
+    Array<{
+      memberId: string;
+      name: string;
+      role: MemberRole;
+      joinedAt: Date;
+    }>
+  > {
+    const rows = await this.sql<
+      { id: string; name: string; role: MemberRole; joined_at: Date }[]
+    >`
+      SELECT id,name,role,joined_at FROM jobsmith_members
+      WHERE project_id=${projectId} ORDER BY joined_at`;
+    return rows.map((row) => ({
+      memberId: row.id,
+      name: row.name,
+      role: row.role,
+      joinedAt: row.joined_at,
+    }));
   }
 }

@@ -9,6 +9,7 @@ import {
 import {
   jobsForWorker,
   parseDueDate,
+  parsePendingArgs,
   resolveUpdateJobs,
 } from "../../src/cli/manualApp.ts";
 import type { LocalProject } from "../../src/project/localConfig.ts";
@@ -25,6 +26,7 @@ const job: ManualJob = {
   tags: ["release", "docs"],
   dueAt: new Date("2026-08-20T00:00:00.000Z"),
   blockedReason: null,
+  claimedUntil: null,
   createdAt: new Date("2026-08-11T00:00:00.000Z"),
   updatedAt: new Date("2026-08-11T00:00:00.000Z"),
 };
@@ -94,6 +96,18 @@ describe("manual CLI presentation", () => {
     );
   });
 
+  test("parses pending paging flags", () => {
+    expect(parsePendingArgs([])).toEqual({});
+    expect(parsePendingArgs(["--limit", "10"])).toEqual({ limit: 10 });
+    expect(parsePendingArgs(["--cursor", "abc", "--limit", "3"])).toEqual({
+      limit: 3,
+      cursor: "abc",
+    });
+    expect(() => parsePendingArgs(["--limit"])).toThrow("--limit");
+    expect(() => parsePendingArgs(["--limit", "soon"])).toThrow("--limit");
+    expect(() => parsePendingArgs(["--cursor"])).toThrow("--cursor");
+  });
+
   test("resolves update jobs by id, exact title, prefix, and substring", () => {
     const jobs = [job, { ...job, id: "other", title: "Prepare deployment" }];
     expect(resolveUpdateJobs(jobs, job.id)).toEqual([job]);
@@ -155,5 +169,47 @@ describe("manual CLI presentation", () => {
       "b",
       "c",
     ]);
+  });
+
+  test("offers other members' expired-claim jobs as available", () => {
+    const mine = project.memberId;
+    const other = "55555555-5555-4555-8555-555555555555";
+    const past = new Date(Date.now() - 60_000);
+    const future = new Date(Date.now() + 600_000);
+    expect(
+      jobsForWorker(
+        [
+          {
+            ...job,
+            id: "expired",
+            state: "IN_PROGRESS",
+            assignedMemberId: other,
+            claimedUntil: past,
+          },
+        ],
+        project,
+      ).map((item) => item.id),
+    ).toEqual(["expired"]);
+    expect(
+      jobsForWorker(
+        [
+          {
+            ...job,
+            id: "held",
+            state: "IN_PROGRESS",
+            assignedMemberId: other,
+            claimedUntil: future,
+          },
+          {
+            ...job,
+            id: "mine-expired",
+            state: "IN_PROGRESS",
+            assignedMemberId: mine,
+            claimedUntil: past,
+          },
+        ],
+        project,
+      ).map((item) => item.id),
+    ).toEqual(["mine-expired"]);
   });
 });

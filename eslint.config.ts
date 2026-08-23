@@ -5,6 +5,25 @@ export default tseslint.config(
   { ignores: ["dist/**", "node_modules/**"] },
   eslint.configs.recommended,
   {
+    // Dashboard modules run in the browser, not under Bun's globals.
+    files: ["src/web/js/**/*.js"],
+    languageOptions: {
+      globals: {
+        window: "readonly",
+        document: "readonly",
+        fetch: "readonly",
+        EventSource: "readonly",
+        URLSearchParams: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        Node: "readonly",
+      },
+    },
+    rules: {
+      "no-empty": ["error", { allowEmptyCatch: true }],
+    },
+  },
+  {
     files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parser: tseslint.parser,

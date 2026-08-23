@@ -13,6 +13,7 @@ import {
   deadlineLabel,
   jobSummary,
   multiSelectMenu,
+  nextPageHint,
   pendingTable,
   priorityLabel,
   selectMenu,
@@ -126,19 +127,36 @@ export async function runManager(
   process.stdout.write(`\nCreated ${job.id}\n${jobSummary(job)}\n`);
 }
 
+export function parsePendingArgs(argv: string[]): {
+  limit?: number;
+  cursor?: string;
+} {
+  const args: { limit?: number; cursor?: string } = {};
+  for (let index = 0; index < argv.length; index++) {
+    const value = argv[index + 1];
+    if (argv[index] === "--limit") {
+      const parsed = Number(value);
+      if (!value || !Number.isInteger(parsed))
+        throw new Error("Use --limit <number>");
+      args.limit = parsed;
+      index++;
+    } else if (argv[index] === "--cursor") {
+      if (!value) throw new Error("Use --cursor <value>");
+      args.cursor = value;
+      index++;
+    }
+  }
+  return args;
+}
+
 export async function runPending(
   service: ManualJobService,
-  root: string,
+  argv: string[] = [],
 ): Promise<void> {
-  const result = await readJobs(root, () => service.listPending());
-  process.stdout.write(
-    `${pendingTable(result.jobs, {
-      syncedAt: result.fetchedAt,
-      fromCache: result.fromCache,
-      offline: result.offline,
-      truncated: result.truncated,
-    })}\n`,
-  );
+  const page = await service.listPage(parsePendingArgs(argv));
+  process.stdout.write(`${pendingTable(page.jobs)}\n`);
+  if (page.nextCursor)
+    process.stdout.write(`${nextPageHint(page.nextCursor)}\n`);
 }
 
 const activeStates = new Set<string>(ACTIVE_STATES);
@@ -147,13 +165,21 @@ export function jobsForWorker(
   jobs: ManualJob[],
   project: LocalProject,
 ): ManualJob[] {
-  return jobs.filter(
-    (job) =>
-      ((job.state === "PENDING" || job.state === "READY") &&
-        job.assignedMemberId === null) ||
-      (activeStates.has(job.state) &&
-        job.assignedMemberId === project.memberId),
-  );
+  const now = Date.now();
+  return jobs.filter((job) => {
+    if (
+      (job.state === "PENDING" || job.state === "READY") &&
+      job.assignedMemberId === null
+    )
+      return true;
+    if (!activeStates.has(job.state)) return false;
+    // Own claims are always manageable; other members' expired leases are
+    // stealable and therefore listed as available.
+    return (
+      job.assignedMemberId === project.memberId ||
+      (job.claimedUntil !== null && job.claimedUntil.getTime() <= now)
+    );
+  });
 }
 
 export function resolveUpdateJobs(

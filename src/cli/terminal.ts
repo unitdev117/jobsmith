@@ -1,7 +1,57 @@
-import { createInterface } from "node:readline/promises";
 import type { ManualJob } from "../services/manualJobService.ts";
 
 const clean = (value: string): string => value.replaceAll(/\s+/g, " ").trim();
+
+// Line input is handled directly instead of node:readline because Bun drops
+// buffered pipe input after the first answered question, which starved every
+// scripted or pasted multi-prompt session.
+const inputState = {
+  buffer: "",
+  waiters: [] as ((line: string) => void)[],
+  attached: false,
+  rawActive: false,
+};
+
+function handleChunk(chunk: Buffer): void {
+  if (inputState.rawActive) return;
+  inputState.buffer += chunk.toString();
+  while (inputState.waiters.length) {
+    const newline = inputState.buffer.indexOf("\n");
+    if (newline < 0) break;
+    const line = inputState.buffer.slice(0, newline).replace(/\r$/, "");
+    inputState.buffer = inputState.buffer.slice(newline + 1);
+    inputState.waiters.shift()!(line);
+  }
+  if (!inputState.waiters.length) process.stdin.pause();
+}
+function takeBufferedLine(): string | null {
+  const newline = inputState.buffer.indexOf("\n");
+  if (newline < 0) return null;
+  const line = inputState.buffer.slice(0, newline).replace(/\r$/, "");
+  inputState.buffer = inputState.buffer.slice(newline + 1);
+  return line;
+}
+
+function readLine(promptText?: string): Promise<string> {
+  if (promptText) process.stdout.write(promptText);
+  if (!inputState.attached) {
+    inputState.attached = true;
+    process.stdin.on("data", handleChunk);
+    process.stdin.on("end", () => {
+      while (inputState.waiters.length) inputState.waiters.shift()!!("");
+      inputState.buffer = "";
+    });
+  }
+  // Buffered line from an earlier chunk: serve it without touching the
+  // stream at all.
+  const buffered = takeBufferedLine();
+  if (buffered !== null) return Promise.resolve(buffered);
+  // Register before resuming: a synchronous delivery must find a waiter.
+  return new Promise((resolve) => {
+    inputState.waiters.push(resolve);
+    process.stdin.resume();
+  });
+}
 
 export async function ask(
   question: string,
@@ -9,12 +59,7 @@ export async function ask(
 ): Promise<string> {
   while (true) {
     const suffix = options.defaultValue ? ` (${options.defaultValue})` : "";
-    const prompt = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    const answer = clean(await prompt.question(`${question}${suffix}: `));
-    prompt.close();
+    const answer = clean(await readLine(`${question}${suffix}: `));
     const value = answer || options.defaultValue || "";
     if (value || !options.required) return value;
     process.stdout.write("This value is required.\n");
@@ -27,6 +72,7 @@ export async function askSecret(question: string): Promise<string> {
 
   while (true) {
     process.stdout.write(`${question} (input hidden): `);
+    inputState.rawActive = true;
     process.stdin.setRawMode(true);
     process.stdin.resume();
     let value = "";
@@ -51,6 +97,7 @@ export async function askSecret(question: string): Promise<string> {
         if (complete) break;
       }
     } finally {
+      inputState.rawActive = false;
       process.stdin.setRawMode(false);
       process.stdin.pause();
       process.stdout.write("\n");
@@ -98,6 +145,7 @@ export async function selectMenu<T>(
     process.stdout.write("\n↑/↓ move  enter select  q cancel\n");
   };
 
+  inputState.rawActive = true;
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdout.write("\u001b[?25l");
@@ -117,6 +165,7 @@ export async function selectMenu<T>(
     }
   } finally {
     process.stdout.write("\u001b[?25h\u001b[2J\u001b[H");
+    inputState.rawActive = false;
     process.stdin.setRawMode(false);
     process.stdin.pause();
   }
@@ -165,6 +214,7 @@ export async function multiSelectMenu<T>(
     });
     process.stdout.write("\n↑/↓ move  space toggle  enter proceed  q cancel\n");
   };
+  inputState.rawActive = true;
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdout.write("\u001b[?25l");
@@ -187,6 +237,7 @@ export async function multiSelectMenu<T>(
     }
   } finally {
     process.stdout.write("\u001b[?25h\u001b[2J\u001b[H");
+    inputState.rawActive = false;
     process.stdin.setRawMode(false);
     process.stdin.pause();
   }
@@ -263,6 +314,12 @@ export function pendingTable(
   ]
     .filter((value): value is string => value !== null)
     .join("\n");
+}
+
+export function nextPageHint(cursor: string): string {
+  const dim = process.stdout.isTTY ? "\u001b[2m" : "";
+  const reset = dim ? "\u001b[0m" : "";
+  return `${dim}Next page: jobsmith pending --cursor ${cursor}${reset}`;
 }
 
 export function jobSummary(job: ManualJob): string {

@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jobsmith</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div>
+          <div class="side-kicker">Workspace</div>
+          <div class="action-row">
+            <button id="create-button" type="button" class="new-job">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New job
+            </button>
+            <button
+              id="refresh-button"
+              type="button"
+              class="icon-btn"
+              aria-label="Refresh now"
+              title="Refresh now"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+                <path d="M20 4v7h-7" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <section class="side-section side-team">
+          <div class="side-label">Members</div>
+          <ul id="member-list" class="team-list"></ul>
+        </section>
+
+        <section class="side-section">
+          <div class="side-label">Connection</div>
+          <div class="meta-list">
+            <div class="meta-row">
+              <span>Events</span>
+              <strong id="connection-state" class="live off">
+                <span class="presence"></span>
+                <span id="connection-text">Connecting&hellip;</span>
+              </strong>
+            </div>
+            <div class="meta-row"><span>Mode</span><strong>Local</strong></div>
+          </div>
+        </section>
+
+        <div class="sidebar-footer">
+          <div class="brand"><span class="brand-mark">J</span>Jobsmith</div>
+          <span class="local">local</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="content">
+          <h1 id="project-name" class="project-name">Jobsmith</h1>
+
+          <section class="queue">
+            <div class="toolbar">
+              <div id="filter-chips" class="filter-row">
+                <div class="filter">
+                  <button class="filter-trigger" type="button">
+                    <span class="trigger-copy">
+                      <span class="trigger-label">Job type</span>
+                      <span class="trigger-value" id="type-value"
+                        >All jobs</span
+                      >
+                    </span>
+                    <svg
+                      class="icon chev"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path d="m7 10 5 5 5-5" />
+                    </svg>
+                  </button>
+                  <div class="menu">
+                    <div class="menu-title">Job type</div>
+                    <button
+                      class="option selected"
+                      type="button"
+                      data-kind="type"
+                      data-value="ALL"
+                      data-label="All jobs"
+                    >
+                      <span class="radio"></span><span>All jobs</span
+                      ><span class="count" data-count-for="ALL">&ndash;</span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="PENDING"
+                      data-label="Pending"
+                    >
+                      <span class="radio"></span><span>Pending</span
+                      ><span class="count" data-count-for="PENDING"
+                        >&ndash;</span
+                      >
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="READY"
+                      data-label="Ready"
+                    >
+                      <span class="radio"></span><span>Ready</span
+                      ><span class="count" data-count-for="READY">&ndash;</span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="IN_PROGRESS"
+                      data-label="In progress"
+                    >
+                      <span class="radio"></span><span>In progress</span
+                      ><span class="count" data-count-for="IN_PROGRESS"
+                        >&ndash;</span
+                      >
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="PAUSED"
+                      data-label="Paused"
+                    >
+                      <span class="radio"></span><span>Paused</span
+                      ><span class="count" data-count-for="PAUSED"
+                        >&ndash;</span
+                      >
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="BLOCKED"
+                      data-label="Blocked"
+                    >
+                      <span class="radio"></span><span>Blocked</span
+                      ><span class="count" data-count-for="BLOCKED"
+                        >&ndash;</span
+                      >
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="COMPLETED"
+                      data-label="Completed"
+                    >
+                      <span class="radio"></span><span>Completed</span
+                      ><span class="count" data-count-for="COMPLETED"
+                        >&ndash;</span
+                      >
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="FAILED"
+                      data-label="Failed"
+                    >
+                      <span class="radio"></span><span>Failed</span
+                      ><span class="count" data-count-for="FAILED"
+                        >&ndash;</span
+                      >
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="type"
+                      data-value="CANCELLED"
+                      data-label="Cancelled"
+                    >
+                      <span class="radio"></span><span>Cancelled</span
+                      ><span class="count" data-count-for="CANCELLED"
+                        >&ndash;</span
+                      >
+                    </button>
+                  </div>
+                </div>
+
+                <div class="filter">
+                  <button class="filter-trigger" type="button">
+                    <span class="trigger-copy">
+                      <span class="trigger-label">Priority</span>
+                      <span class="trigger-value" id="priority-value"
+                        >All priorities</span
+                      >
+                    </span>
+                    <svg
+                      class="icon chev"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path d="m7 10 5 5 5-5" />
+                    </svg>
+                  </button>
+                  <div class="menu">
+                    <div class="menu-title">Priority</div>
+                    <button
+                      class="option selected"
+                      type="button"
+                      data-kind="priority"
+                      data-value="all"
+                      data-label="All priorities"
+                    >
+                      <span class="radio"></span><span>All priorities</span
+                      ><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="priority"
+                      data-value="critical"
+                      data-label="Critical"
+                    >
+                      <span class="radio"></span><span>Critical</span
+                      ><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="priority"
+                      data-value="high"
+                      data-label="High"
+                    >
+                      <span class="radio"></span><span>High</span><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="priority"
+                      data-value="medium"
+                      data-label="Medium"
+                    >
+                      <span class="radio"></span><span>Medium</span
+                      ><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="priority"
+                      data-value="low"
+                      data-label="Low"
+                    >
+                      <span class="radio"></span><span>Low</span><span></span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="filter">
+                  <button class="filter-trigger" type="button">
+                    <span class="trigger-copy">
+                      <span class="trigger-label">Job age</span>
+                      <span class="trigger-value" id="age-value">None</span>
+                    </span>
+                    <svg
+                      class="icon chev"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path d="m7 10 5 5 5-5" />
+                    </svg>
+                  </button>
+                  <div class="menu">
+                    <div class="menu-title">Job age</div>
+                    <button
+                      class="option selected"
+                      type="button"
+                      data-kind="age"
+                      data-value="none"
+                      data-label="None"
+                    >
+                      <span class="radio"></span><span>None</span><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="age"
+                      data-value="oldest"
+                      data-label="Oldest first"
+                    >
+                      <span class="radio"></span><span>Oldest first</span
+                      ><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="age"
+                      data-value="newest"
+                      data-label="Newest first"
+                    >
+                      <span class="radio"></span><span>Newest first</span
+                      ><span></span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="filter">
+                  <button class="filter-trigger" type="button">
+                    <span class="trigger-copy">
+                      <span class="trigger-label">Per page</span>
+                      <span class="trigger-value" id="size-value">25</span>
+                    </span>
+                    <svg
+                      class="icon chev"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path d="m7 10 5 5 5-5" />
+                    </svg>
+                  </button>
+                  <div class="menu">
+                    <div class="menu-title">Jobs per page</div>
+                    <button
+                      class="option selected"
+                      type="button"
+                      data-kind="size"
+                      data-value="25"
+                      data-label="25"
+                    >
+                      <span class="radio"></span><span>25 jobs</span
+                      ><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="size"
+                      data-value="50"
+                      data-label="50"
+                    >
+                      <span class="radio"></span><span>50 jobs</span
+                      ><span></span>
+                    </button>
+                    <button
+                      class="option"
+                      type="button"
+                      data-kind="size"
+                      data-value="custom"
+                      data-label="Custom"
+                    >
+                      <span class="radio"></span><span>Custom&hellip;</span
+                      ><span></span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <label class="search">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-3.4-3.4" />
+                </svg>
+                <input
+                  id="search-input"
+                  type="search"
+                  placeholder="Search jobs&hellip;"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+
+            <div id="jobs-error" class="jobs-error hidden">
+              <p>Could not load work items.</p>
+              <button id="retry-button" type="button" class="claim">
+                Retry
+              </button>
+            </div>
+
+            <div id="jobs-skeleton" class="hidden" aria-hidden="true"></div>
+
+            <div id="jobs-table-wrap" class="table-wrap" hidden>
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 32%">Job</th>
+                    <th style="width: 13%">State</th>
+                    <th style="width: 13%">Priority</th>
+                    <th style="width: 11%">Due</th>
+                    <th style="width: 15%">Assigned to</th>
+                    <th style="width: 10%">Updated</th>
+                    <th style="width: 6%; text-align: right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="jobs-body"></tbody>
+              </table>
+              <div id="jobs-empty" class="empty">
+                No work items yet. Create the first one to get started.
+              </div>
+            </div>
+
+            <button id="load-more" type="button" class="load-more" hidden>
+              Load more
+            </button>
+
+            <div class="footer">
+              <span id="result-count">&ndash;</span>
+              <span id="sort-status">No age sort applied</span>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="job-dialog" class="dialog">
+      <form id="job-form" method="dialog" novalidate>
+        <h2 id="job-dialog-title">New job</h2>
+        <label class="field">
+          <span class="field-label"
+            >Title
+            <span id="title-count" class="field-counter">0/120</span></span
+          >
+          <input
+            id="job-title"
+            name="title"
+            type="text"
+            maxlength="120"
+            required
+            autocomplete="off"
+          />
+          <span id="title-hint" class="field-hint" hidden></span>
+        </label>
+        <label class="field">
+          <span class="field-label"
+            >Description
+            <span id="description-count" class="field-counter"
+              >0/4000</span
+            ></span
+          >
+          <textarea
+            id="job-description"
+            name="description"
+            maxlength="4000"
+          ></textarea>
+          <span id="description-hint" class="field-hint" hidden></span>
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">Priority</span>
+            <select id="job-priority" name="priority">
+              <option value="9">Critical</option>
+              <option value="7">High</option>
+              <option value="5" selected>Medium</option>
+              <option value="2">Low</option>
+            </select>
+            <span id="priority-hint" class="field-hint" hidden></span>
+          </label>
+          <label class="field">
+            <span class="field-label">Due date (optional)</span>
+            <input id="job-due-date" name="dueDate" type="date" />
+          </label>
+        </div>
+        <label class="field">
+          <span class="field-label">Tags (comma-separated)</span>
+          <input
+            id="job-tags"
+            name="tags"
+            type="text"
+            autocomplete="off"
+            placeholder="backend, urgent"
+          />
+          <span id="tags-hint" class="field-hint" hidden></span>
+        </label>
+        <div class="dialog-actions">
+          <button
+            id="job-cancel-button"
+            type="button"
+            class="btn"
+            value="cancel"
+          >
+            Cancel
+          </button>
+          <button id="job-submit-button" type="submit" class="btn btn-primary">
+            Save
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="update-dialog" class="dialog">
+      <form id="update-form" novalidate>
+        <h2 id="update-dialog-title">Update job</h2>
+        <p id="update-job-title" class="dialog-subtitle"></p>
+
+        <label class="field field-narrow">
+          <span class="field-label">Progress (%)</span>
+          <input
+            id="update-progress"
+            name="progress"
+            type="number"
+            min="0"
+            max="100"
+            step="1"
+          />
+          <span id="progress-hint" class="field-hint" hidden></span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Add note (optional)</span>
+          <textarea
+            id="update-note"
+            name="note"
+            maxlength="4000"
+            placeholder="What changed since the last update?"
+          ></textarea>
+        </label>
+
+        <fieldset class="transition-group">
+          <legend class="field-label">Status</legend>
+          <div class="transition-actions">
+            <button type="button" data-outcome="PAUSED" class="btn">
+              Pause
+            </button>
+            <button type="button" data-outcome="BLOCKED" class="btn">
+              Mark blocked
+            </button>
+            <button
+              type="button"
+              data-outcome="PENDING"
+              class="btn"
+              title="Release back to the pool for other workers"
+            >
+              Release
+            </button>
+            <button type="button" data-outcome="FAILED" class="btn btn-danger">
+              Mark failed
+            </button>
+            <button
+              type="button"
+              data-outcome="COMPLETED"
+              class="btn btn-primary"
+            >
+              Mark completed
+            </button>
+          </div>
+        </fieldset>
+
+        <div class="dialog-actions">
+          <button id="update-close-button" type="button" class="btn">
+            Close
+          </button>
+          <button id="update-save-button" type="submit" class="btn btn-primary">
+            Save progress
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="cancel-job-dialog" class="dialog dialog-confirm">
+      <h2>Cancel this job?</h2>
+      <p id="cancel-job-text" class="confirm-text"></p>
+      <div class="dialog-actions">
+        <button id="cancel-job-no" type="button" class="btn">Keep it</button>
+        <button id="cancel-job-yes" type="button" class="btn btn-danger">
+          Cancel job
+        </button>
+      </div>
+    </dialog>
+
+    <dialog id="details-dialog" class="dialog">
+      <h2 id="details-title"></h2>
+      <dl id="details-grid" class="details-grid"></dl>
+      <p id="details-description" class="details-desc"></p>
+      <div class="dialog-actions">
+        <button id="details-close-button" type="button" class="btn">
+          Close
+        </button>
+      </div>
+    </dialog>
+
+    <script type="module" src="/js/main.js"></script>
+  </body>
+</html>

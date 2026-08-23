@@ -33,6 +33,7 @@ const job = (id: string): ManualJob => ({
   tags: [],
   dueAt: null,
   blockedReason: null,
+  claimedUntil: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 });

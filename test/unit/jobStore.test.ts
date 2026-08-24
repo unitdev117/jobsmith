@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { Logger } from "pino";
 import { createLogger } from "../../src/observability/logger.ts";
 import type { EventBusLike } from "../../src/server/events.ts";
 import type { JobStoreDeps } from "../../src/server/jobStore.ts";
@@ -247,6 +248,161 @@ describe("JobStore cold-start retry", () => {
     // Without a reset this would double to 80ms; recovery must restart at base.
     expect(waitedMs).toBeLessThan(base * 1.5);
     await waitFor(() => callTimes.length === 4, 500);
+    await store.close();
+  });
+});
+
+describe("JobStore description rendering", () => {
+  test("listPage attaches sanitized html only to wrapped rows, bytes intact", async () => {
+    const rawWrapped = "{# Hi\n\n- [x] a\n\n[bad](javascript:x)";
+    const wrapped = { ...makeJob(), description: `${rawWrapped}}` };
+    const plain = { ...makeJob(), description: "plain text" };
+    const store = new JobStore({
+      jobs: fakeJobs(async () => ({
+        jobs: [wrapped, plain],
+        nextCursor: null,
+      })),
+      bus: fakeBus(),
+      log,
+    });
+    await store.start();
+
+    const page = await store.listPage({});
+    expect(page.jobs[0]!.description).toBe(`${rawWrapped}}`);
+    expect(page.jobs[0]!.descriptionHtml).toContain("<h1>");
+    expect(page.jobs[0]!.descriptionHtml).not.toContain("javascript:");
+    // Plain rows must not carry the key at all.
+    expect("descriptionHtml" in page.jobs[1]!).toBe(false);
+    expect(page.jobs[1]!.description).toBe("plain text");
+    await store.close();
+  });
+
+  test("a failing renderer drops the field and logs a warning without throwing", async () => {
+    const warns: unknown[] = [];
+    const capturingLog = {
+      info: () => undefined,
+      debug: () => undefined,
+      warn: (object: unknown) => {
+        warns.push(object);
+      },
+    } as unknown as Logger;
+    // Wrapped source required: unwrapped rows short-circuit before rendering.
+    const row = { ...makeJob(), description: "{# Hi}" };
+    const store = new JobStore({
+      jobs: fakeJobs(async () => ({ jobs: [row], nextCursor: null })),
+      bus: fakeBus(),
+      log: capturingLog,
+      renderDescription: () => {
+        throw new Error("renderer exploded");
+      },
+    });
+    await store.start();
+
+    const page = await store.listPage({});
+    expect("descriptionHtml" in page.jobs[0]!).toBe(false);
+    expect(warns[0]).toMatchObject({
+      event: "server.description_render_failed",
+      jobId: row.id,
+      errorType: "Error",
+    });
+    await store.close();
+  });
+});
+
+describe("JobStore stale revalidation", () => {
+  test("external writes surface once the snapshot goes stale", async () => {
+    let clock = 1_000_000;
+    let rows: ManualJob[] = [];
+    const jobs = fakeJobs(async () => ({
+      jobs: rows.map((row) => ({ ...row })),
+      nextCursor: null,
+    }));
+    const store = new JobStore({
+      jobs,
+      bus: fakeBus(),
+      log,
+      revalidateAfterMs: 5_000,
+      now: () => clock,
+    });
+    await store.start();
+    expect((await store.listPage({})).jobs).toHaveLength(0);
+
+    // A CLI process wrote straight to the database; no event fired.
+    rows = [makeJob()];
+    clock += 6_000;
+    const page = await store.listPage({});
+    expect(page.jobs).toHaveLength(1);
+    expect(jobs.stats.listPageCalls).toBe(2);
+    await store.close();
+  });
+
+  test("fresh snapshots are served without touching the database", async () => {
+    let clock = 1_000_000;
+    const jobs = fakeJobs(async () => ({
+      jobs: [makeJob()],
+      nextCursor: null,
+    }));
+    const store = new JobStore({
+      jobs,
+      bus: fakeBus(),
+      log,
+      revalidateAfterMs: 5_000,
+      now: () => clock,
+    });
+    await store.start();
+    clock += 1_000;
+    await store.listPage({});
+    clock += 1_000;
+    await store.listPage({});
+    expect(jobs.stats.listPageCalls).toBe(1);
+    await store.close();
+  });
+
+  test("failed revalidation keeps serving the last good snapshot", async () => {
+    let clock = 1_000_000;
+    let failing = false;
+    const good = makeJob();
+    const jobs = fakeJobs(async () => {
+      if (failing) throw new Error("database gone");
+      return { jobs: [{ ...good }], nextCursor: null };
+    });
+    const store = new JobStore({
+      jobs,
+      bus: fakeBus(),
+      log,
+      revalidateAfterMs: 5_000,
+      now: () => clock,
+    });
+    await store.start();
+
+    failing = true;
+    clock += 6_000;
+    const page = await store.listPage({});
+    expect(page.jobs.map((job) => job.id)).toEqual([good.id]);
+    await store.close();
+  });
+
+  test("overlapping stale readers share one revalidation", async () => {
+    let clock = 1_000_000;
+    let rows: ManualJob[] = [];
+    const jobs = fakeJobs(async () => ({
+      jobs: rows.map((row) => ({ ...row })),
+      nextCursor: null,
+    }));
+    const store = new JobStore({
+      jobs,
+      bus: fakeBus(),
+      log,
+      revalidateAfterMs: 5_000,
+      now: () => clock,
+    });
+    await store.start();
+
+    rows = [makeJob(), makeJob()];
+    clock += 6_000;
+    const [a, b] = await Promise.all([store.listPage({}), store.listPage({})]);
+    expect(a.jobs.length + b.jobs.length).toBeGreaterThanOrEqual(2);
+    expect(jobs.stats.listPageCalls).toBe(2);
     await store.close();
   });
 });

@@ -1,6 +1,5 @@
 import type { Logger } from "pino";
 import type {
-  JobPage,
   ManualJob,
   ManualJobService,
   WorkState,
@@ -13,11 +12,16 @@ import {
 } from "../services/pagination.ts";
 import { ServiceError } from "../services/errors.ts";
 import type { EventBusLike } from "./events.ts";
+import {
+  isWrappedDescription,
+  renderDescription,
+} from "./descriptionMarkdown.ts";
 
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 200;
 const DEFAULT_RETRY_DELAY_MS = 1000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 10000;
+const DEFAULT_REVALIDATE_AFTER_MS = 15_000;
 
 // The routes only ever see this surface, so the store can stand in for the
 // service and serve reads entirely from memory.
@@ -42,6 +46,22 @@ export interface JobStoreDeps {
   retryDelayMs?: number;
   maxRetryDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  // Injection seam so tests can force a failing renderer.
+  renderDescription?: (raw: string) => string | null;
+  // Snapshots older than this are re-fetched before serving reads, so
+  // external writers stay visible even without Valkey events.
+  revalidateAfterMs?: number;
+  now?: () => number;
+}
+
+// Extra field served to dashboards; never persisted or sent to the CLI.
+export interface ApiJob extends ManualJob {
+  descriptionHtml?: string;
+}
+
+export interface ApiJobPage {
+  jobs: ApiJob[];
+  nextCursor: string | null;
 }
 
 interface SortKey {
@@ -81,8 +101,13 @@ export class JobStore implements JobBoard {
   private readonly retryDelayMs: number;
   private readonly maxRetryDelayMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly renderDescription: (raw: string) => string | null;
+  private readonly revalidateAfterMs: number;
+  private readonly now: () => number;
   private rows: PagedJob[] = [];
   private ready = false;
+  // Wall-clock of the last successful database load; drives read revalidation.
+  private loadedAt: number | null = null;
   private backoffMs = 0;
   private reloadQueue = Promise.resolve();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -98,6 +123,10 @@ export class JobStore implements JobBoard {
     this.maxRetryDelayMs = deps.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
     this.sleep =
       deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.renderDescription = deps.renderDescription ?? renderDescription;
+    this.revalidateAfterMs =
+      deps.revalidateAfterMs ?? DEFAULT_REVALIDATE_AFTER_MS;
+    this.now = deps.now ?? Date.now;
   }
 
   async start(): Promise<void> {
@@ -116,10 +145,11 @@ export class JobStore implements JobBoard {
 
   async listPage(
     options: { limit?: number; cursor?: string | null; state?: string } = {},
-  ): Promise<JobPage> {
+  ): Promise<ApiJobPage> {
     // Until the first successful load the snapshot is empty but valid
     // rows exist server-side; refusing here keeps dashboards honest.
     if (!this.ready) throw new ServiceError(503, "Work items are loading");
+    await this.revalidateIfStale();
     const limit = Math.min(
       MAX_PAGE_LIMIT,
       Math.max(1, options.limit ?? DEFAULT_PAGE_LIMIT),
@@ -134,7 +164,7 @@ export class JobStore implements JobBoard {
     const last = page[page.length - 1];
     const nextCursor =
       last && startAt + limit < sorted.length ? encode(last) : null;
-    return { jobs: page.map(toApiJob), nextCursor };
+    return { jobs: page.map((job) => this.toApiJob(job)), nextCursor };
   }
 
   // Counts are always exact so terminal states outside the row cache
@@ -207,6 +237,25 @@ export class JobStore implements JobBoard {
     }, this.debounceMs);
   }
 
+  // Read-path revalidation: stale snapshots trigger one shared reload so
+  // overlapping requests cannot stampede the database.
+  private revalidateLoad: Promise<void> | null = null;
+
+  private isStale(): boolean {
+    return (
+      this.loadedAt === null ||
+      this.now() - this.loadedAt > this.revalidateAfterMs
+    );
+  }
+
+  private async revalidateIfStale(): Promise<void> {
+    if (!this.isStale()) return;
+    this.revalidateLoad ??= this.enqueueReload().finally(() => {
+      this.revalidateLoad = null;
+    });
+    await this.revalidateLoad;
+  }
+
   private enqueueReload(): Promise<void> {
     this.reloadQueue = this.reloadQueue.then(() => this.reload());
     return this.reloadQueue;
@@ -240,6 +289,7 @@ export class JobStore implements JobBoard {
       }
       this.rows = rows;
       this.backoffMs = 0;
+      this.loadedAt = this.now();
       if (!this.ready) {
         this.ready = true;
         this.log.info(
@@ -296,6 +346,26 @@ export class JobStore implements JobBoard {
     }
     return low;
   }
+
+  private toApiJob(job: PagedJob): ApiJob {
+    const { createdAtUs: _createdAtUs, ...rest } = job;
+    if (!isWrappedDescription(job.description)) return rest;
+    try {
+      const descriptionHtml = this.renderDescription(job.description);
+      return descriptionHtml ? { ...rest, descriptionHtml } : rest;
+    } catch (error) {
+      // A malformed render must never fail the whole listing.
+      this.log.warn(
+        {
+          event: "server.description_render_failed",
+          jobId: job.id,
+          errorType: error instanceof Error ? error.name : "UnknownError",
+        },
+        "Description markdown render failed",
+      );
+      return rest;
+    }
+  }
 }
 
 const encode = (job: PagedJob): string =>
@@ -306,8 +376,3 @@ const encode = (job: PagedJob): string =>
     createdAtUs: job.createdAtUs,
     id: job.id,
   });
-
-const toApiJob = (job: PagedJob): ManualJob => {
-  const { createdAtUs: _createdAtUs, ...rest } = job;
-  return rest;
-};

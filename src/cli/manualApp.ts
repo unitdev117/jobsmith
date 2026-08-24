@@ -17,6 +17,7 @@ import {
   pendingTable,
   priorityLabel,
   selectMenu,
+  unescapeNewlines,
 } from "./terminal.ts";
 
 const priorities = [
@@ -69,11 +70,19 @@ export async function runManager(
     .min(1)
     .max(120)
     .parse(await ask("Job name", { required: true }));
-  const description = z
-    .string()
-    .min(1)
-    .max(4000)
-    .parse(await ask("Description", { required: true }));
+  // Length validation runs on the EXPANDED value — that is what the DB
+  // CHECK will see.
+  const expandedDescription = unescapeNewlines(
+    await ask("Description", { required: true }),
+  );
+  logger.debug(
+    {
+      event: "cli.description_newlines_expanded",
+      breaks: (expandedDescription.match(/\n/g) ?? []).length,
+    },
+    "CLI description newlines expanded",
+  );
+  const description = z.string().min(1).max(4000).parse(expandedDescription);
   const priority = await selectMenu(
     "Select job priority",
     priorities,

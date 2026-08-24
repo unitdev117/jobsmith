@@ -4,6 +4,8 @@ import { createLogger } from "../../src/observability/logger.ts";
 import { createApp } from "../../src/server/app.ts";
 import type { LocalProject } from "../../src/project/localConfig.ts";
 import { ServiceError } from "../../src/services/errors.ts";
+import { JobStore } from "../../src/server/jobStore.ts";
+import { unusedJobBoard } from "./jobBoardStub.ts";
 import type {
   JobPage,
   ManualJob,
@@ -401,5 +403,96 @@ describe("serve token auth", () => {
   test("without a configured token the API trusts localhost", async () => {
     const response = await buildApp().request("/api/project");
     expect(response.status).toBe(200);
+  });
+});
+
+describe("description markdown over HTTP", () => {
+  // Production serves reads through JobStore, so the harness wraps the fake
+  // board the same way; mutations flow store -> board -> reload.
+  const rawWrapped = "{# Hi\n\n[bad](javascript:x)}";
+  let current: ManualJob;
+
+  const buildStoreApp = async (): Promise<Hono> => {
+    current = { ...job, description: rawWrapped };
+    const board = unusedJobBoard({
+      countAll: async () => 1,
+      listPage: async () => ({ jobs: [current], nextCursor: null }),
+      create: async () => current,
+      update: async (_id, patch) => {
+        current = { ...current, ...(patch as Partial<ManualJob>) };
+        return current;
+      },
+    });
+    const store = new JobStore({
+      jobs: board,
+      bus: {
+        start: async (): Promise<void> => undefined,
+        onChange: (): (() => void) => () => undefined,
+        close: async (): Promise<void> => undefined,
+      },
+      log,
+    });
+    await store.start();
+    return buildApp({ jobs: store });
+  };
+
+  test("create responses stay service-shaped without the html field", async () => {
+    const app = await buildStoreApp();
+    const created = await app.request("/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Md job", description: rawWrapped }),
+    });
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as {
+      description: string;
+      descriptionHtml?: string;
+    };
+    expect(body.descriptionHtml).toBeUndefined();
+    expect(body.description).toBe(rawWrapped);
+  });
+
+  test("listings carry raw bytes plus sanitized html for wrapped rows", async () => {
+    const app = await buildStoreApp();
+    await app.request("/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Md job", description: rawWrapped }),
+    });
+    const listed = await app.request("/api/jobs");
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      jobs: { description: string; descriptionHtml?: string }[];
+    };
+    expect(body.jobs[0]!.description).toBe(rawWrapped);
+    expect(body.jobs[0]!.descriptionHtml).toContain("<h1>");
+    expect(body.jobs[0]!.descriptionHtml).not.toContain("javascript:");
+  });
+
+  test("patching wrapped back to plain flips the field off", async () => {
+    const app = await buildStoreApp();
+    await app.request("/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Md job", description: rawWrapped }),
+    });
+    const patched = await app.request(`/api/jobs/${job.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ description: "plain words again" }),
+    });
+    expect(patched.status).toBe(200);
+    const patchedBody = (await patched.json()) as {
+      description: string;
+      descriptionHtml?: string;
+    };
+    expect(patchedBody.descriptionHtml).toBeUndefined();
+
+    const listed = await app.request("/api/jobs");
+    const body = (await listed.json()) as {
+      jobs: { description: string; descriptionHtml?: string }[];
+    };
+    expect("descriptionHtml" in body.jobs[0]!).toBe(false);
+    expect(body.jobs[0]!.description).toBe("plain words again");
   });
 });

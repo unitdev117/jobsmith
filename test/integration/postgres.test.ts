@@ -363,4 +363,28 @@ describe.skipIf(!enabled)("isolated PostgreSQL collaboration engine", () => {
       WHERE id=${created.id}`;
     expect(row?.assigned_member_id).toBe(workerTwoId);
   }, 60_000);
+
+  test("wrapped markdown descriptions round-trip byte-exact", async () => {
+    const log = createLogger("markdown-roundtrip-integration");
+    const host = new ManualJobService(
+      sql,
+      project(hostId, "Host", "HOST"),
+      notifier,
+      log,
+    );
+    // Newlines, backticks, and entity-worthy characters must survive
+    // parameterized storage untouched.
+    const source =
+      "{# Release notes\n\n- [x] `bun test`\n- pending items\n\n[docs](https://example.com/a?b=1&c=2)}";
+    const created = await host.create({
+      title: "Markdown round trip",
+      description: source,
+      priority: 5,
+      tags: [],
+      dueAt: null,
+    });
+    const [row] =
+      await sql`SELECT description FROM jobsmith_work_items WHERE id=${created.id}`;
+    expect(row?.description).toBe(source);
+  }, 60_000);
 });

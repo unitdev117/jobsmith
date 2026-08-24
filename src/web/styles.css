@@ -911,8 +911,11 @@ td {
   width: min(640px, calc(100vw - 28px));
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
+#job-dialog {
+  width: min(780px, calc(100vw - 28px));
+}
 #details-dialog {
-  width: min(680px, calc(100vw - 28px));
+  width: min(920px, calc(100vw - 28px));
 }
 .dialog::backdrop {
   background: rgba(5, 7, 9, 0.62);
@@ -1034,7 +1037,7 @@ td {
   overflow-y: auto;
 }
 #job-description {
-  height: 180px;
+  height: 280px;
 }
 #update-note {
   height: 72px;
@@ -1073,8 +1076,11 @@ textarea[aria-invalid="true"] {
 
 .details-grid {
   display: grid;
-  grid-template-columns: 96px 1fr;
-  gap: 9px 14px;
+  /* Two label/value pairs per row; the description pane below scrolls. */
+  grid-template-columns:
+    fit-content(130px) minmax(0, 1fr) fit-content(130px)
+    minmax(0, 1fr);
+  gap: 12px 18px;
   align-items: center;
   margin: 14px 0 10px;
 }
@@ -1099,8 +1105,122 @@ textarea[aria-invalid="true"] {
   border: 1px solid var(--line-soft);
   border-radius: 9px;
   padding: 12px 14px;
-  max-height: 260px;
+  /* Large reading pane: rendered Markdown gets room, long docs scroll. */
+  max-height: min(62vh, 680px);
   overflow: auto;
+}
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.field-check-label {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+/* Rendered Markdown descriptions; the server sanitizes before this sees it. */
+.md-body {
+  white-space: normal;
+  line-height: 1.55;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin: 0.9em 0 0.4em;
+  line-height: 1.25;
+  color: var(--text);
+}
+.md-body h1 {
+  font-size: 1.35em;
+}
+.md-body h2 {
+  font-size: 1.2em;
+}
+.md-body h3 {
+  font-size: 1.08em;
+}
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  font-size: 1em;
+}
+.md-body p {
+  margin: 0.55em 0;
+}
+.md-body ul,
+.md-body ol {
+  margin: 0.55em 0;
+  padding-left: 1.4em;
+}
+.md-body li {
+  margin: 0.2em 0;
+}
+.md-body li.task-list-item {
+  list-style: none;
+  margin-left: -1.2em;
+}
+.md-body pre {
+  margin: 0.65em 0;
+  padding: 9px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  overflow-x: auto;
+}
+.md-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 0.09em 0.32em;
+}
+.md-body pre code {
+  background: none;
+  padding: 0;
+}
+.md-body blockquote {
+  margin: 0.65em 0;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 3px solid var(--line);
+  color: var(--text-3);
+}
+.md-body table {
+  margin: 0.65em 0;
+  border-collapse: collapse;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--line-soft);
+  padding: 4px 9px;
+  text-align: left;
+}
+.md-body th {
+  background: var(--surface-2);
+}
+.md-body a {
+  color: inherit;
+  text-decoration: underline;
+}
+.md-body hr {
+  margin: 0.9em 0;
+  border: 0;
+  border-top: 1px solid var(--line);
 }
 
 @media (max-width: 1100px) {

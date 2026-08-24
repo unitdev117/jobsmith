@@ -41,7 +41,7 @@ When using the globally linked development command, Jobsmith also checks the ins
 
 ## Valkey (host-owned, optional)
 
-Valkey is **never required for correctness**. Only the **host device** runs a Valkey server (for example, under the project domain); member devices connect to the host's `valkeyUrl` from their `.jobsmith/config.json`. If Valkey is missing or down, every command still works — only the realtime niceties below are lost, and `jobsmith status` reports `online workers: unavailable` instead of failing.
+Valkey is **never required for correctness**. Only the **host device** runs a Valkey server (for example, under the project domain); member devices connect to the host's `valkeyUrl` from their `.jobsmith/config.json`. If Valkey is missing or down, every command still works — only the realtime niceties below are lost, and `jobsmith status` reports `online workers: unavailable` instead of failing. Dashboard listings additionally self-refresh when their snapshot is more than ~15 seconds old, so external writes stay visible without events.
 
 ## Initialize or join
 
@@ -81,6 +81,10 @@ jobsmith manager
 ```
 
 Prompts for the required name, description, and priority, then optional due date and tags.
+
+Descriptions may be plain text. Wrapping the whole description in `{ ... }` renders it as Markdown on the dashboard (headings, lists, tables, task lists, fenced code, links); unmatched braces display as-is. Raw HTML always displays as text, links are limited to `http`/`https`/`mailto`, and embedded images are not rendered.
+
+The manager's Description prompt is line-based: type `\n` where a line break is wanted, `\\n` for a literal backslash-n. This applies only to that prompt; the web textarea accepts real Enter keys.
 
 ```bash
 jobsmith worker

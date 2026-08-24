@@ -66,6 +66,18 @@ export async function ask(
   }
 }
 
+// Terminal lines cannot contain Enter, so authors spell newlines as \n;
+// \\n escapes back to a literal backslash-n.
+export function unescapeNewlines(value: string): string {
+  // Single left-to-right scan via sentinel so \n inside an already-consumed
+  // escape is not re-expanded.
+  const SENTINEL = "\u0000";
+  return value
+    .replaceAll("\\\\n", SENTINEL)
+    .replaceAll("\\n", "\n")
+    .replaceAll(SENTINEL, "\\n");
+}
+
 export async function askSecret(question: string): Promise<string> {
   if (!process.stdin.isTTY || !process.stdout.isTTY)
     return ask(question, { required: true });

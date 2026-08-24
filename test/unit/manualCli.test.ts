@@ -1,16 +1,24 @@
-import { describe, expect, test } from "bun:test";
-import type { ManualJob } from "../../src/services/manualJobService.ts";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  ManualJob,
+  ManualJobService,
+} from "../../src/services/manualJobService.ts";
 import {
   deadlineLabel,
   jobSummary,
   pendingTable,
   priorityLabel,
+  unescapeNewlines,
 } from "../../src/cli/terminal.ts";
 import {
   jobsForWorker,
   parseDueDate,
   parsePendingArgs,
   resolveUpdateJobs,
+  runManager,
 } from "../../src/cli/manualApp.ts";
 import type { LocalProject } from "../../src/project/localConfig.ts";
 
@@ -211,5 +219,142 @@ describe("manual CLI presentation", () => {
         project,
       ).map((item) => item.id),
     ).toEqual(["mine-expired"]);
+  });
+
+  test("expands \\n sequences and keeps \\\\n literal in isolation", () => {
+    expect(unescapeNewlines(String.raw`a\nb`)).toBe("a\nb");
+    expect(unescapeNewlines(String.raw`a\\nb`)).toBe(String.raw`a\nb`);
+    expect(unescapeNewlines("no escapes here")).toBe("no escapes here");
+    expect(unescapeNewlines(String.raw`\\n then \n`)).toBe(
+      `${String.raw`\n`} then \n`,
+    );
+  });
+});
+
+describe("manager description newline convention", () => {
+  // terminal.ts attaches to the real stdin once per process; shadow only
+  // the methods it uses so piped lines drive whole manager sessions.
+  let capturedHandler: ((chunk: Buffer) => void) | null = null;
+  const stdin = process.stdin as unknown as Record<string, unknown>;
+
+  beforeAll(() => {
+    stdin.on = (event: string, fn: (chunk: Buffer) => void) => {
+      if (event === "data") capturedHandler = fn;
+      return process.stdin;
+    };
+    stdin.resume = () => undefined;
+    stdin.pause = () => undefined;
+  });
+
+  afterAll(() => {
+    delete stdin.on;
+    delete stdin.resume;
+    delete stdin.pause;
+  });
+
+  async function runSession(lines: string[]): Promise<{
+    created: ManualJob[];
+    failure: Error | null;
+  }> {
+    const created: ManualJob[] = [];
+    let failure: Error | null = null;
+    const service = {
+      create: async (input: {
+        title: string;
+        description: string;
+        priority: number;
+        tags: string[];
+        dueAt: Date | null;
+      }) => {
+        const now = new Date();
+        const createdJob: ManualJob = {
+          id: crypto.randomUUID(),
+          title: input.title,
+          description: input.description,
+          priority: input.priority,
+          state: "PENDING",
+          progressPercent: 0,
+          assignedMemberId: null,
+          assignedWorkerName: null,
+          tags: input.tags,
+          dueAt: input.dueAt,
+          blockedReason: null,
+          claimedUntil: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        created.push(createdJob);
+        return createdJob;
+      },
+      listPending: async () => ({ jobs: [], truncated: false }),
+    } as unknown as ManualJobService;
+    const root = mkdtempSync(join(tmpdir(), "jobsmith-cli-test-"));
+    try {
+      // The first prompt attaches its handler before suspending, so one
+      // buffered delivery serves the whole session.
+      const session = runManager(service, project, root);
+      capturedHandler?.(Buffer.from(lines.join(""), "utf8"));
+      await session;
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    return { created, failure };
+  }
+
+  // Every session answers: title, description, priority, due date, tags,
+  // confirm (empty -> yes).
+  test("piped session expands \\n pairs but preserves escaped \\\\n", async () => {
+    const typedDescription = String.raw`{\n# Title\n\nbody\\nliteral}`;
+    const { created, failure } = await runSession([
+      "Release notes\n",
+      `${typedDescription}\n`,
+      "3\n",
+      "\n",
+      "\n",
+      "\n",
+    ]);
+    expect(failure).toBeNull();
+    expect(created).toHaveLength(1);
+    expect(created[0]!.description).toBe("{\n# Title\n\nbody\\nliteral}");
+  });
+
+  test("answers without backslash sequences stay byte-identical", async () => {
+    const { created, failure } = await runSession([
+      "Plain job\n",
+      "just plain text\n",
+      "3\n",
+      "\n",
+      "\n",
+      "\n",
+    ]);
+    expect(failure).toBeNull();
+    expect(created[0]!.description).toBe("just plain text");
+  });
+
+  test("length validation runs on the expanded value", async () => {
+    const content = "a".repeat(3000);
+    const accepted = await runSession([
+      "Big but legal\n",
+      `${content}${"\\n".repeat(999)}\n`,
+      "3\n",
+      "\n",
+      "\n",
+      "\n",
+    ]);
+    expect(accepted.failure).toBeNull();
+    expect(accepted.created[0]!.description).toBe(
+      `${content}${"\n".repeat(999)}`,
+    );
+    expect(accepted.created[0]!.description).toHaveLength(3999);
+
+    // Must run last: leftover piped lines would poison a later session.
+    const rejected = await runSession([
+      "Too long after expansion\n",
+      `${content}${"\\n".repeat(1001)}\n`,
+    ]);
+    expect(rejected.failure?.name).toBe("ZodError");
+    expect(rejected.created).toHaveLength(0);
   });
 });

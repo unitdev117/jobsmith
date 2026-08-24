@@ -17,6 +17,7 @@ export default tseslint.config(
         setTimeout: "readonly",
         clearTimeout: "readonly",
         Node: "readonly",
+        console: "readonly",
       },
     },
     rules: {

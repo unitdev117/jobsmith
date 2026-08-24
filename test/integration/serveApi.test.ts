@@ -9,6 +9,7 @@ import { createLogger } from "../../src/observability/logger.ts";
 import type { LocalProject } from "../../src/project/localConfig.ts";
 import { createApp } from "../../src/server/app.ts";
 import type { EventEnvelope } from "../../src/server/events.ts";
+import { JobStore } from "../../src/server/jobStore.ts";
 import { ManualJobService } from "../../src/services/manualJobService.ts";
 import { ProjectService } from "../../src/services/projectService.ts";
 
@@ -26,6 +27,7 @@ describe.skipIf(!enabled)("local HTTP API against PostgreSQL", () => {
   const projectId = crypto.randomUUID();
   const hostId = crypto.randomUUID();
   let sql: Database;
+  let jobs: JobStore;
   let app: Hono;
   // Captured change listeners so tests can simulate delivered SSE frames.
   const changeHandlers = new Set<(envelope: EventEnvelope) => void>();
@@ -54,14 +56,27 @@ describe.skipIf(!enabled)("local HTTP API against PostgreSQL", () => {
     await sql`INSERT INTO jobsmith_members(id,project_id,name,role,machine_id)
       VALUES(${hostId},${projectId},'Host','HOST',${crypto.randomUUID()})`;
     const log = createLogger("serve-api-integration", undefined, "silent");
+    const jobsService = new ManualJobService(
+      sql,
+      project,
+      { publish: async (): Promise<void> => undefined },
+      log,
+    );
+    // Production shape: reads are served by the in-memory store. Its bus is
+    // private so SSE listener-count assertions below stay untouched.
+    jobs = new JobStore({
+      jobs: jobsService,
+      bus: {
+        start: async (): Promise<void> => undefined,
+        onChange: (): (() => void) => () => undefined,
+        close: async (): Promise<void> => undefined,
+      },
+      log,
+    });
+    await jobs.start();
     app = createApp({
       project,
-      jobs: new ManualJobService(
-        sql,
-        project,
-        { publish: async (): Promise<void> => undefined },
-        log,
-      ),
+      jobs,
       invites: new ProjectService(sql, log),
       members: new ProjectService(sql, log),
       presence: (projectId) => readPresence(project.valkeyUrl, projectId, log),
@@ -78,6 +93,7 @@ describe.skipIf(!enabled)("local HTTP API against PostgreSQL", () => {
   }, 30_000);
 
   afterAll(async () => {
+    await jobs?.close();
     if (sql) await sql.end();
     if (/^[a-zA-Z0-9_]+$/.test(schema))
       await admin`DROP SCHEMA ${admin(schema)} CASCADE`;
@@ -261,4 +277,53 @@ describe.skipIf(!enabled)("local HTTP API against PostgreSQL", () => {
 
     await reader.cancel();
   });
+
+  test("wrapped descriptions gain sanitized html in listings only", async () => {
+    const rawWrapped = "{# Hi\n\n[bad](javascript:x)}";
+    const created = await app.request("/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Markdown listing",
+        description: rawWrapped,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as {
+      id: string;
+      description: string;
+      descriptionHtml?: string;
+    };
+    // Mutation responses keep service shape; only listings decorate.
+    expect(createdBody.descriptionHtml).toBeUndefined();
+    expect(createdBody.description).toBe(rawWrapped);
+
+    const listed = await app.request("/api/jobs");
+    const listBody = (await listed.json()) as {
+      jobs: {
+        id: string;
+        description: string;
+        descriptionHtml?: string;
+      }[];
+    };
+    const wrapped = listBody.jobs.find((entry) => entry.id === createdBody.id);
+    expect(wrapped?.description).toBe(rawWrapped);
+    expect(wrapped?.descriptionHtml).toContain("<h1>");
+    expect(wrapped?.descriptionHtml).not.toContain("javascript:");
+
+    const plainCreated = await app.request("/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Plain listing", description: "plain" }),
+    });
+    expect(plainCreated.status).toBe(201);
+    const plainId = ((await plainCreated.json()) as { id: string }).id;
+    const relisted = await app.request("/api/jobs?limit=200");
+    const plainBody = (await relisted.json()) as {
+      jobs: { id: string; descriptionHtml?: string }[];
+    };
+    const plain = plainBody.jobs.find((entry) => entry.id === plainId);
+    expect(plain).toBeDefined();
+    expect("descriptionHtml" in plain!).toBe(false);
+  }, 60_000);
 });

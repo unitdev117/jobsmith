@@ -59,6 +59,19 @@ let events = null;
 
 const $ = (id) => document.getElementById(id);
 
+// Wire format opt-in: leading "{" and trailing "}" mark Markdown mode.
+const isWrapped = (raw) => {
+  const trimmed = String(raw ?? "").trim();
+  return (
+    trimmed.length >= 2 && trimmed.startsWith("{") && trimmed.endsWith("}")
+  );
+};
+const stripWrapper = (raw) =>
+  String(raw ?? "")
+    .trim()
+    .slice(1, -1)
+    .trim();
+
 function setLiveIndicator(open) {
   $("connection-state").classList.toggle("off", !open);
   $("connection-text").textContent = open ? "Live" : "Reconnecting…";
@@ -635,6 +648,7 @@ function openCreateDialog() {
   $("job-dialog-title").textContent = "New job";
   $("job-submit-button").textContent = "Create";
   $("job-form").reset();
+  $("job-markdown").checked = false;
   $("job-priority").value = "5";
   $("job-due-date").value = "";
   updateCounters();
@@ -661,7 +675,13 @@ function openEditDialog(job) {
   $("job-submit-button").textContent = "Save";
   $("job-form").reset();
   $("job-title").value = job.title;
-  $("job-description").value = job.description ?? "";
+  // Primary signal is the server field; the local fallback keeps editing
+  // correct against stale cached rows.
+  const markdown = job.descriptionHtml != null || isWrapped(job.description);
+  $("job-markdown").checked = markdown;
+  $("job-description").value = markdown
+    ? stripWrapper(job.description)
+    : (job.description ?? "");
   $("job-priority").value = priorityOptionValue(job.priority);
   $("job-due-date").value = job.dueAt ? String(job.dueAt).slice(0, 10) : "";
   $("job-tags").value = (job.tags ?? []).join(", ");
@@ -674,15 +694,19 @@ async function submitJobForm(event) {
   event.preventDefault();
   const button = $("job-submit-button");
   clearFieldHints();
+  const description = $("job-description").value;
   const patch = {
     title: $("job-title").value.trim(),
-    description: $("job-description").value,
+    description: $("job-markdown").checked ? `{${description}}` : description,
     priority: Number.parseInt($("job-priority").value, 10),
     tags: parseTagsInput($("job-tags").value),
     dueAt: dueDateValue(),
   };
   if (!Number.isInteger(patch.priority)) delete patch.priority;
-  if (patch.description === "") delete patch.description;
+  // An empty ticked box must reuse the existing empty-description path,
+  // not silently store "{}".
+  if (patch.description === "" || patch.description === "{}")
+    delete patch.description;
   button.disabled = true;
   const finish = () => {
     button.disabled = false;
@@ -823,8 +847,19 @@ function openDetails(job) {
   ];
   $("details-grid").replaceChildren(...entries.flat());
   const description = $("details-description");
-  description.textContent = job.description || "No description.";
-  description.classList.toggle("muted", !job.description);
+  if (job.descriptionHtml) {
+    // The server already sanitized this HTML; the client never parses
+    // Markdown itself.
+    console.debug("[jobsmith] markdown description", job.id);
+    description.replaceChildren(
+      el("div", { class: "md-body", html: job.descriptionHtml }),
+    );
+    description.classList.remove("muted");
+  } else {
+    console.debug("[jobsmith] plain description", job.id);
+    description.textContent = job.description || "No description.";
+    description.classList.toggle("muted", !job.description);
+  }
   $("details-dialog").showModal();
 }
 
